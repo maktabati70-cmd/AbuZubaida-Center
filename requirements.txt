@@ -1,0 +1,7 @@
+flask
+feedparser
+requests
+deep-translator
+curl_cffi
+trafilatura
+pywebview
