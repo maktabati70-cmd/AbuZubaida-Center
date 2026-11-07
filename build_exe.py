@@ -53,7 +53,7 @@ def main():
             say(f"  ← {pkg} (اختيارية)")
             pip(pkg)
     say("\n  2) بناء الملف التنفيذي…")
-    args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--console",
+    args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--noconsole",
             "--name", NAME, "--icon", os.path.join(HERE, "icon.ico"),
             "--distpath", os.path.join(HERE, "dist"), "--workpath", os.path.join(HERE, "build"),
             "--specpath", os.path.join(HERE, "build")]
