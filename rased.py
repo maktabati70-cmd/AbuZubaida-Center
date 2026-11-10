@@ -44,7 +44,13 @@ from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from urllib.parse import quote, quote_plus, urlparse
 
-VERSION = "2026.11.06"
+VERSION = "2026.11.08"
+
+# التشغيل بلا نافذة سوداء (pythonw أو exe بلا وحدة تحكم): نوجّه المخرجات إلى «لا شيء» حتى لا تتعطل الطباعة
+if sys.stdout is None or sys.stderr is None:
+    _null = open(os.devnull, "w", encoding="utf-8")
+    sys.stdout = sys.stdout or _null
+    sys.stderr = sys.stderr or _null
 DEFAULT_REPO = "maktabati70-cmd/AbuZubaida-Center"     # مستودع GitHub الذي تُسحب منه التحديثات
 
 # نسخة exe: إن وُجد rased.py محدَّث بجانب الملف التنفيذي (نزّله التحديث التلقائي) يُشغَّل بدل النسخة المدمجة
@@ -142,7 +148,6 @@ CATEGORIES = [
     ("war",          "الحروب والنزاعات والدفاع",   "#E8774A"),
     ("intel",        "الأمن والاستخبارات",          "#F472B6"),
     ("official",     "البيانات الرسمية",            "#94A3B8"),
-    ("gdelt",        "رصد GDELT متعدد اللغات",       "#22D3EE"),
     ("economy",      "الأخبار الاقتصادية",         "#3DD68C"),
     ("tweets",       "التغريدات وتيليغرام",        "#6CB6E8"),
     ("keywords",     "رصد الكلمات المفتاحية",      "#E8C987"),
@@ -606,7 +611,7 @@ EVENT_TYPES = [
     ("توغل عسكري", "#0EA5E9", ["توغل", "توغلت", "تتوغل", "يتوغل", "اقتحام", "اقتحمت", "اقتحم", "تقتحم", "يقتحم", "اقتحامات"], ["incursion", "stormed", "ground raid", "ground incursion"]),
 ]
 EVENT_COLORS = {e[0]: e[1] for e in EVENT_TYPES}
-EVENT_CATS = ("world", "arab", "war", "terror", "intel", "tweets", "keywords", "think_global", "think_arab", "gdelt")
+EVENT_CATS = ("world", "arab", "war", "terror", "intel", "tweets", "keywords", "think_global", "think_arab")
 STUDY_EV_CATS = ("think_global", "think_arab")      # المقالات والدراسات: يُفحص العنوان فقط
 _VIP_AR = ["قيادي", "القيادي", "زعيم", "قائد", "امير", "مسؤول", "وزير", "جنرال", "مستشار", "نائب", "رئيس", "ضابط كبير"]
 _VIP_EN = ["leader", "commander", "senior", "top official", "minister", "general", "emir", "chief", "deputy", "mastermind", "kingpin"]
@@ -754,6 +759,9 @@ def init_db():
     if "cluster" not in cols:
         con.execute("ALTER TABLE items ADD COLUMN cluster TEXT")
         con.execute("ALTER TABLE items ADD COLUMN nsrc INTEGER DEFAULT 1")
+    scols = {r[1] for r in con.execute("PRAGMA table_info(sanctions)")}
+    if scols and "groups" not in scols:
+        con.execute("ALTER TABLE sanctions ADD COLUMN groups TEXT")
     if "edits" not in cols:
         con.execute("ALTER TABLE items ADD COLUMN edits INTEGER DEFAULT 0")
     con.executescript("""
@@ -765,7 +773,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS case_items(case_id TEXT, item_id TEXT, note TEXT, added INTEGER, snap TEXT,
         PRIMARY KEY(case_id, item_id));
     CREATE TABLE IF NOT EXISTS sanctions(uid TEXT PRIMARY KEY, list TEXT, name TEXT, type TEXT, program TEXT,
-        remarks TEXT, listed TEXT, first_seen INTEGER, is_new INTEGER DEFAULT 0);
+        remarks TEXT, listed TEXT, first_seen INTEGER, is_new INTEGER DEFAULT 0, groups TEXT);
     CREATE INDEX IF NOT EXISTS ix_sanc_seen ON sanctions(first_seen DESC);
     """)
     con.execute("CREATE TABLE IF NOT EXISTS icons(key TEXT PRIMARY KEY, ctype TEXT, data BLOB, fetched INTEGER, ok INTEGER)")
@@ -785,6 +793,12 @@ def kv_get(k, default=None):
 
 def kv_set(k, v):
     x("INSERT OR REPLACE INTO kv(k, v) VALUES(?, ?)", (k, str(v)))
+
+
+def cleanup_removed():
+    """يحذف بقايا الميزات الملغاة (GDELT) من قاعدة البيانات."""
+    x("DELETE FROM items WHERE cat='gdelt'")
+    x("DELETE FROM source_status WHERE cat='gdelt' OR name LIKE 'GDELT:%'")
 
 
 def repair_translations():
@@ -3026,7 +3040,7 @@ def api_bot_reset():
 
 
 # ───────────────────────── التحقق من الخبر: تجميع ما نقلته مصادر مختلفة عن الحدث نفسه ─────────────────────────
-VERIFY_CATS = ("world", "arab", "war", "terror", "intel", "tweets", "keywords", "economy", "gdelt")
+VERIFY_CATS = ("world", "arab", "war", "terror", "intel", "tweets", "keywords", "economy")
 _STOP = {norm_ar(w) for w in (
     "في من على إلى الى عن مع بعد قبل أن ان إن التي الذي الذين هذا هذه ذلك تلك كما قد لم لن ما لا هو هي هم بين "
     "حول خلال عبر منذ حتى أو او ثم كل أي اي عند قال يقول تقول قالت اليوم أمس الجديد جديد جديدة بشأن وسط ضد نحو "
@@ -3348,194 +3362,6 @@ def api_net():
     return jsonify(countries=out, recent=recent, last=NET["last"], error=NET["error"])
 
 
-# ───────────────────────── GDELT: رصد عالمي بأكثر من 60 لغة (مجاني بلا مفتاح) ─────────────────────────
-GDELT_API = "https://api.gdeltproject.org/api/v2/doc/doc"
-GDELT_QUERIES = [
-    ("الإعلام العبري", "hebrew", "he"), ("الإعلام الفارسي", "persian", "fa"), ("الإعلام التركي", "turkish", "tr"),
-    ("الإعلام الروسي", "russian", "ru"), ("الإعلام العربي", "arabic", "ar"), ("الإعلام الفرنسي", "french", "fr"),
-    ("الإعلام الدولي", "english", "en"),
-]
-GDELT_THEMES = "(theme:TERROR OR theme:ARMEDCONFLICT OR theme:MILITARY OR theme:KILL)"
-
-
-def fetch_gdelt():
-    total = 0
-    for name, lang, code in GDELT_QUERIES:
-        label = f"GDELT: {name}"
-        try:
-            r = requests.get(GDELT_API, headers=HEADERS, timeout=40, params={
-                "query": f"{GDELT_THEMES} sourcelang:{lang}", "mode": "ArtList", "format": "json",
-                "maxrecords": 40, "timespan": "3h", "sort": "DateDesc"})
-            try:
-                arts = r.json().get("articles", [])
-            except Exception:
-                raise ValueError(r.text.strip()[:120] or f"رمز {r.status_code}")
-            items = []
-            for a_ in arts:
-                try:
-                    ts = int(datetime.strptime(a_.get("seendate", ""), "%Y%m%dT%H%M%SZ").replace(tzinfo=__import__("datetime").timezone.utc).timestamp())
-                except Exception:
-                    ts = now()
-                e_ = {"title": a_.get("title", ""), "link": a_.get("url", ""), "published_parsed": time.gmtime(ts)}
-                dom = (a_.get("domain") or "").replace("www.", "")
-                it = make_item(e_, "gdelt", dom, f"{dom} · {name.replace('الإعلام ', '')}", code)
-                if it:
-                    items.append(it)
-            store_items(items)
-            total += len(items)
-            set_status(label, "gdelt", bool(items), len(items), "GDELT", "" if items else "لا نتائج في آخر 3 ساعات")
-        except Exception as e:
-            set_status(label, "gdelt", False, 0, "GDELT", str(e)[:200])
-        time.sleep(6)                      # GDELT يطلب طلباً واحداً كل 5 ثوانٍ
-    return total
-
-
-def gdelt_loop():
-    time.sleep(50)
-    while True:
-        try:
-            fetch_gdelt()
-        except Exception:
-            log.exception("gdelt")
-        time.sleep(900)
-
-
-# ───────────────────────── إشعارات ويندوز ─────────────────────────
-NOTIFY = {"last_qual_toast": 0}
-
-
-def notify_cfg():
-    try:
-        c = json.loads(kv_get("notify_cfg") or "{}")
-    except Exception:
-        c = {}
-    for k, v in (("on", True), ("qual", True), ("alerts", True), ("net", True), ("sound", True)):
-        c.setdefault(k, v)
-    c.setdefault("countries", "")
-    return c
-
-
-def win_toast(title, body, sound=True):
-    if os.name != "nt":
-        log.info("إشعار: %s — %s", title, body)
-        return False
-    import subprocess
-    e = lambda t: html.escape(t or "", quote=True).replace("'", "''")
-    audio = '<audio src="ms-winsoundevent:Notification.Default"/>' if sound else '<audio silent="true"/>'
-    xml_ = (f'<toast><visual><binding template="ToastGeneric"><text>{e(title[:120])}</text><text>{e(body[:300])}</text>'
-            f'</binding></visual>{audio}</toast>')
-    ps = ("[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null;"
-          "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null;"
-          f"$x = New-Object Windows.Data.Xml.Dom.XmlDocument; $x.LoadXml('{xml_}');"
-          "$n = New-Object Windows.UI.Notifications.ToastNotification $x;"
-          "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("
-          "'{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show($n)")
-    try:
-        subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", ps],
-                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        return True
-    except Exception as e_:
-        log.warning("toast: %s", e_)
-        return False
-
-
-def notify_loop():
-    time.sleep(25)
-    last = now()
-    while True:
-        start = now()
-        try:
-            c = notify_cfg()
-            if c["on"]:
-                wanted = [w.strip() for w in re.split(r"[،,]", c.get("countries") or "") if w.strip()]
-                if c["qual"] and start - NOTIFY["last_qual_toast"] >= 120:
-                    rows = q("SELECT title, title_ar, events, countries FROM items WHERE events != '' AND events IS NOT NULL "
-                             "AND fetched > ? AND published >= ? ORDER BY published DESC LIMIT 30", (last, start - 3 * 3600))
-                    if wanted:
-                        rows = [r for r in rows if any(f"|{w}|" in (r["countries"] or "") for w in wanted)]
-                    if rows:
-                        r0 = rows[0]
-                        ev = (r0["events"] or "").strip("|").split("|")[0]
-                        if len(rows) == 1:
-                            win_toast(f"⚡ خبر نوعي: {ev}", r0["title_ar"] or r0["title"], c["sound"])
-                        else:
-                            win_toast(f"⚡ {len(rows)} أخبار نوعية جديدة", " • ".join((r["title_ar"] or r["title"])[:70] for r in rows[:3]), c["sound"])
-                        NOTIFY["last_qual_toast"] = start
-                if c["alerts"] or c["net"]:
-                    for a_ in q("SELECT kind, msg FROM alerts WHERE created > ? ORDER BY created LIMIT 3", (last,)):
-                        if (a_["kind"] == "net" and c["net"]) or (a_["kind"] != "net" and c["alerts"]):
-                            win_toast("📡 انقطاع إنترنت" if a_["kind"] == "net" else "🚨 إنذار مبكر", a_["msg"], c["sound"])
-        except Exception:
-            log.exception("notify")
-        last = start
-        time.sleep(30)
-
-
-@app.get("/api/notify")
-def api_notify():
-    return jsonify(cfg=notify_cfg(), windows=os.name == "nt")
-
-
-@app.post("/api/notify")
-def api_notify_set():
-    b = request.get_json(silent=True) or {}
-    c = notify_cfg()
-    for k in ("on", "qual", "alerts", "net", "sound"):
-        if k in b:
-            c[k] = bool(b[k])
-    if "countries" in b:
-        c["countries"] = str(b["countries"])[:300]
-    kv_set("notify_cfg", json.dumps(c, ensure_ascii=False))
-    return jsonify(ok=True)
-
-
-@app.post("/api/notify/test")
-def api_notify_test():
-    ok = win_toast("مركز أبو زبيدة للتتبع والرصد", "هذا إشعار تجريبي: الإشعارات تعمل.", notify_cfg()["sound"])
-    return jsonify(ok=ok, windows=os.name == "nt")
-
-
-# ───────────────────────── الخط الزمني ─────────────────────────
-@app.get("/api/timeline")
-def api_timeline():
-    a = request.args
-    days = max(1, min(int(a.get("days") or 7), 31))
-    qual = a.get("qual") == "1"
-    t0 = now() - days * 86400
-    if a.get("case"):
-        items = []
-        for r in q("SELECT snap FROM case_items WHERE case_id=?", (a["case"],)):
-            d = json.loads(r["snap"])
-            if d["published"] >= t0 and (not qual or d.get("events")):
-                items.append(d)
-        allrows = items
-    else:
-        where, args = ["published >= ?"], [t0]
-        if a.get("country"):
-            where.append("countries LIKE ?"); args.append(f"%|{a['country']}|%")
-        for w in (a.get("q") or "").split()[:5]:
-            where.append("(title_ar LIKE ? OR title LIKE ? OR summary_ar LIKE ?)"); args += [f"%{w}%"] * 3
-        wsql = " AND ".join(where)
-        allrows = [dict(r) for r in q(f"SELECT published, events FROM items WHERE {wsql}", args)]
-        if qual:
-            wsql += " AND events != '' AND events IS NOT NULL"
-        items = [dict(r) for r in q(f"SELECT id, cat, source_ar, title, title_ar, summary_ar, published, events, countries, nsrc, link "
-                                    f"FROM items WHERE {wsql} ORDER BY published DESC LIMIT 400", args)]
-    per_day = {}
-    for r in allrows:
-        d = datetime.fromtimestamp(r["published"]).strftime("%Y-%m-%d")
-        pd_ = per_day.setdefault(d, {"day": d, "total": 0, "qual": 0})
-        pd_["total"] += 1
-        if r.get("events"):
-            pd_["qual"] += 1
-    days_list = []
-    for k in range(days - 1, -1, -1):
-        d = datetime.fromtimestamp(now() - k * 86400).strftime("%Y-%m-%d")
-        days_list.append(per_day.get(d, {"day": d, "total": 0, "qual": 0}))
-    items.sort(key=lambda r: r["published"], reverse=True)
-    return jsonify(items=items, days=days_list)
-
-
 # ───────────────────────── شعارات المراكز والمصادر ─────────────────────────
 _ICON_LOCK = threading.Lock()
 
@@ -3648,10 +3474,6 @@ def check_update(apply=True):
         kv_set("upd_hash", h)
         UPDATE.update(state="نُزِّل تحديث جديد، يُطبَّق عند إعادة التشغيل", ready=True)
         log.info("نُزِّل تحديث جديد من GitHub (الإصدار %s)", rv or "؟")
-        try:
-            win_toast("تحديث جديد للمركز", f"نُزِّل الإصدار {rv or 'الجديد'}. أعد تشغيل البرنامج لتطبيقه.", notify_cfg()["sound"])
-        except Exception:
-            pass
     except Exception as e:
         UPDATE.update(error=str(e)[:200], last=now())
         log.warning("التحديث: %s", UPDATE["error"])
@@ -3894,14 +3716,59 @@ TERROR_PROGRAMS = ("SDGT", "FTO", "IRGC", "HIZBALLAH", "QDi", "QDe", "TAi", "TAe
 SANC = {"running": False, "last": 0, "error": "", "counts": {}}
 
 
+SANC_GROUPS = [
+    ("داعش", r"\bisil\b|\bisis\b|islamic state|da'?esh|\bdaesh\b|wilayat|iswap|isis-k|\bis-k\b|khorasan province"),
+    ("القاعدة", r"al[- ]?qa'?ida|al[- ]?qaeda|\baqap\b|\baqim\b|\bjnim\b|nusrat al-islam"),
+    ("هيئة تحرير الشام والنصرة", r"hay'?at tahrir|tahrir al-sham|\bhts\b|nusrah front|al-nusrah|jabhat al-nusra"),
+    ("حراس الدين", r"hurras al-?din|hurras ad-?din"),
+    ("حزب الله", r"hizballah|hezbollah|hizbollah"),
+    ("الحرس الثوري وفيلق القدس", r"\birgc\b|revolutionary guard|qods force|quds force"),
+    ("طالبان وشبكة حقاني", r"taliban|haqqani|\btai\.|\btae\."),
+    ("حركة الشباب", r"al[- ]?shabaa?b"),
+    ("بوكو حرام", r"boko haram|ansaru"),
+    ("الحوثيون (أنصار الله)", r"ansarallah|ansar allah|houthi"),
+    ("حماس", r"\bhamas\b|qassam brigades|izz al-din al-qassam"),
+    ("الجهاد الإسلامي", r"palestinian islamic jihad|\bpij\b"),
+    ("لشكر طيبة وجيش محمد", r"lashkar|jaish-e-mohammed|jaish-e-muhammad|jaish-i-mohammed"),
+]
+_SG_RES = [(n, re.compile(p_, re.I)) for n, p_ in SANC_GROUPS]
+
+
+def sanc_groups(name, program, remarks):
+    rem = re.sub(r"^\s*Al-Qaida\s*\|", "", remarks or "")       # اسم القائمة الأممية ليس دليلاً على الانتماء
+    t = " ".join(filter(None, [name, program, rem]))
+    out = [n for n, rx in _SG_RES if rx.search(t)]
+    if not out and re.search(r"\bQD[ie]\b", program or ""):
+        out.append("قائمة داعش والقاعدة الأممية")
+    return ("|" + "|".join(out) + "|") if out else ""
+
+
 def _sanc_upsert(rows, baseline):
     t = now()
     ex = {r["uid"] for r in q("SELECT uid FROM sanctions")}
     new = [r for r in rows if r[0] not in ex]
     if new:
-        x("""INSERT OR IGNORE INTO sanctions(uid, list, name, type, program, remarks, listed, first_seen, is_new)
-             VALUES(?,?,?,?,?,?,?,?,?)""", [r + (t, 0 if baseline else 1) for r in new], many=True)
+        x("""INSERT OR IGNORE INTO sanctions(uid, list, name, type, program, remarks, listed, first_seen, is_new, groups)
+             VALUES(?,?,?,?,?,?,?,?,?,?)""",
+          [r + (t, 0 if baseline else 1, sanc_groups(r[2], r[4], r[5])) for r in new], many=True)
     return len(new)
+
+
+def fetch_opensanctions(dataset, list_name, baseline):
+    """مصدر احتياطي مجاني (OpenSanctions، للاستخدام غير التجاري) إن تعذّر الموقع الرسمي."""
+    import csv
+    content = http_get_big([f"https://data.opensanctions.org/datasets/latest/{dataset}/targets.simple.csv"], 50000,
+                           valid=lambda c: c[:3] == b"id," or c[:6] == b"\xef\xbb\xbfid,")
+    text = content.decode("utf-8-sig", errors="replace")
+    rows = []
+    typ = {"Person": "individual", "Vessel": "vessel", "Airplane": "aircraft"}
+    for rec in csv.DictReader(io.StringIO(text)):
+        prog = (rec.get("sanctions") or "")[:300]
+        remarks = " | ".join(filter(None, [rec.get("countries") and "الدول: " + rec["countries"],
+                                           rec.get("aliases") and "أسماء أخرى: " + rec["aliases"][:250]]))
+        rows.append(("os:" + rec.get("id", ""), list_name, rec.get("name", ""), typ.get(rec.get("schema", ""), "entity"),
+                     prog, remarks[:600], (rec.get("first_seen") or "")[:10]))
+    return _sanc_upsert(rows, baseline), len(rows)
 
 
 def http_get_big(urls, min_size=10000, valid=None):
@@ -3968,10 +3835,14 @@ def fetch_sanctions():
         return
     SANC.update(running=True, error="")
     errs = []
-    for key, fn in (("OFAC", fetch_ofac), ("UN", fetch_un)):
+    for key, fn, osds, lname in (("OFAC", fetch_ofac, "us_ofac_sdn", "OFAC"), ("UN", fetch_un, "un_sc_sanctions", "الأمم المتحدة")):
         baseline = not kv_get("sanc_base_" + key)
         try:
-            n_new, total = fn(baseline)
+            try:
+                n_new, total = fn(baseline)
+            except Exception as e_off:          # الموقع الرسمي تعذّر: المصدر الاحتياطي
+                log.info("قائمة %s الرسمية تعذّرت (%s)، تجربة المصدر الاحتياطي", key, str(e_off)[:80])
+                n_new, total = fetch_opensanctions(osds, lname, baseline)
             SANC["counts"][key] = total
             if baseline:
                 kv_set("sanc_base_" + key, now())
@@ -3981,6 +3852,8 @@ def fetch_sanctions():
         except Exception as e:
             errs.append(f"{key}: {str(e)[:120]}")
             set_status(f"قائمة عقوبات {key}", "official", False, 0, "رسمي", str(e)[:200])
+    for r in q("SELECT uid, name, program, remarks FROM sanctions WHERE groups IS NULL"):   # تصنيف القديم
+        x("UPDATE sanctions SET groups=? WHERE uid=?", (sanc_groups(r["name"], r["program"], r["remarks"]), r["uid"]))
     SANC.update(running=False, last=now(), error="؛ ".join(errs))
     if len(errs) < 2:                      # نجحت قائمة واحدة على الأقل: الموعد التالي بعد 6 ساعات
         kv_set("sanc_last", now())
@@ -4003,20 +3876,33 @@ def sanctions_loop():
 @app.get("/api/sanctions")
 def api_sanctions():
     a = request.args
-    mode = a.get("mode", "new")
+    mode = a.get("mode", "terror")
+    page, per = max(1, int(a.get("page") or 1)), 50
     where, args = ["1=1"], []
     order = "first_seen DESC, name"
+    terror_sql = "(" + " OR ".join(["program LIKE ?"] * len(TERROR_PROGRAMS)) + " OR (groups IS NOT NULL AND groups != ''))"
+    terror_args = [f"%{p_}%" for p_ in TERROR_PROGRAMS]
+    if mode == "terror":
+        where.append(terror_sql); args += terror_args
+        order = "COALESCE(NULLIF(listed,''), '0000') DESC, name"
+        if a.get("group"):
+            where.append("groups LIKE ?"); args.append(f"%|{a['group']}|%")
     if mode == "new":
         # الجديد منذ بدء الرصد، ومعه أحدث إدراجات الأمم المتحدة (لها تاريخ إدراج) خلال السنتين الأخيرتين
         where.append("(is_new=1 OR (listed != '' AND listed >= ?))")
         args.append(datetime.fromtimestamp(now() - 730 * 86400).strftime("%Y-%m-%d"))
         order = "is_new DESC, COALESCE(NULLIF(listed,''), '0000') DESC, first_seen DESC"
-    if a.get("terror") == "1":
-        where.append("(" + " OR ".join(["program LIKE ?"] * len(TERROR_PROGRAMS)) + ")")
-        args += [f"%{p_}%" for p_ in TERROR_PROGRAMS]
+    if a.get("terror") == "1" and mode != "terror":
+        where.append(terror_sql); args += terror_args
     for w in (a.get("q") or "").split()[:5]:
-        where.append("(name LIKE ? OR remarks LIKE ? OR program LIKE ?)"); args += [f"%{w}%"] * 3
-    rows = q(f"SELECT * FROM sanctions WHERE {' AND '.join(where)} ORDER BY {order} LIMIT 300", args)
+        where.append("(name LIKE ? OR remarks LIKE ? OR program LIKE ? OR groups LIKE ?)"); args += [f"%{w}%"] * 4
+    wsql = " AND ".join(where)
+    total = q(f"SELECT COUNT(*) c FROM sanctions WHERE {wsql}", args, one=True)["c"]
+    rows = q(f"SELECT * FROM sanctions WHERE {wsql} ORDER BY {order} LIMIT ? OFFSET ?", args + [per, (page - 1) * per])
+    gcount = Counter()
+    for r in q(f"SELECT groups FROM sanctions WHERE {terror_sql}", terror_args):
+        gcount.update(g for g in (r["groups"] or "").strip("|").split("|") if g)
+    groups = [{"name": n, "count": gcount.get(n, 0)} for n, _ in SANC_GROUPS + [("قائمة داعش والقاعدة الأممية", "")] if gcount.get(n)]
     out = []
     for r in rows:
         d = dict(r)
@@ -4031,7 +3917,8 @@ def api_sanctions():
               "error": (st_rows.get(f"قائمة عقوبات {k}") or {}).get("error", "")}
              for k, n, lname in (("OFAC", "قائمة OFAC الأمريكية", "OFAC"), ("UN", "قائمة مجلس الأمن الدولي", "الأمم المتحدة"))]
     return jsonify(items=out, counts=counts, new_week=newc, state=SANC, last=int(kv_get("sanc_last", 0)), lists=lists,
-                   curl_cffi=cffi_requests is not None)
+                   curl_cffi=cffi_requests is not None, total=total, page=page, pages=max(1, -(-total // per)),
+                   groups=groups, terror_total=q(f"SELECT COUNT(*) c FROM sanctions WHERE {terror_sql}", terror_args, one=True)["c"])
 
 
 @app.post("/api/sanctions/refresh")
@@ -5757,23 +5644,9 @@ dialog::backdrop{background:rgba(2,5,10,.7);backdrop-filter:blur(3px)}
     <div class="box" style="margin-top:16px"><div class="boxh">آخر تنبيهات الانقطاع (48 ساعة)<span class="sp"></span><span class="wstat" id="netlast"></span></div><div class="tablewrap" id="netrecent"></div></div>
   </section>
 
-  <!-- الخط الزمني -->
-  <section id="tlview" hidden>
-    <div class="box filters" style="padding:10px 12px">
-      <select id="tlcountry" aria-label="الدولة"><option value="">كل الدول</option></select>
-      <select id="tlcase" aria-label="ملف قضية"><option value="">بدون ملف قضية</option></select>
-      <input id="tlq" type="search" placeholder="أو كلمة، مثل: داعش" style="flex:1;min-width:160px;height:34px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);padding:0 10px">
-      <div class="seg" id="tldays"><button data-tld="1">يوم</button><button data-tld="3">3 أيام</button><button data-tld="7" class="on">أسبوع</button><button data-tld="30">شهر</button></div>
-      <label class="opt" style="font-size:13px"><input type="checkbox" id="tlqual" checked>الأحداث النوعية فقط</label>
-    </div>
-    <div class="box tlchart" id="tlchart"></div>
-    <div class="tl" id="tllist"></div>
-  </section>
-
   <!-- الإعدادات -->
   <section id="setview" hidden>
     <div class="box lanbox" id="updbox"></div>
-    <div class="box lanbox" id="notifbox"></div>
     <div id="setlan"></div>
     <div class="box lanbox"><b style="font:700 14px var(--fd)">وضع الشاشة الكبيرة</b><span class="hint" style="font-size:12.5px;color:var(--muted)">عرض بملء الشاشة لغرفة عمليات أو شاشة على الحائط، يتنقل تلقائياً كل 20 ثانية بين الخريطة والأخبار النوعية والإنذارات وحالة الإنترنت. للخروج اضغط Esc.</span><div class="row"><button class="ibtn primary" id="wallgo">تشغيل وضع الشاشة الكبيرة</button></div></div>
   </section>
@@ -5795,14 +5668,15 @@ dialog::backdrop{background:rgba(2,5,10,.7);backdrop-filter:blur(3px)}
   <!-- العقوبات والتصنيفات -->
   <section id="sancview" hidden>
     <div class="sanclists" id="sanclists"></div>
-    <div class="tabs2" id="sanctabs"><button data-stab="new" class="on">أحدث الإدراجات</button><button data-stab="all">البحث في القوائم كاملة</button></div>
+    <div class="tabs2" id="sanctabs"><button data-stab="terror" class="on">قوائم الإرهاب</button><button data-stab="new">أحدث الإدراجات</button><button data-stab="all">البحث في القوائم كاملة</button></div>
+    <div class="qtypes box" id="sancgroups" style="margin-bottom:12px"></div>
     <div class="filters">
       <input id="sancq" type="search" placeholder="ابحث باسم شخص أو كيان، أو بالجنسية…" style="flex:1;min-width:240px;height:36px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:0 12px">
-      <label class="opt" style="font-size:13px"><input type="checkbox" id="sancterror" checked>الإرهاب فقط</label>
+      <label class="opt" style="font-size:13px" id="sancterrorlbl" hidden><input type="checkbox" id="sancterror" checked>الإرهاب فقط</label>
       <span class="count" id="sanccount"></span>
       <button class="ibtn" id="sancref">تحديث القوائم</button>
     </div>
-    <div class="box tablewrap" id="sanclist"></div>
+    <div class="box"><div class="tablewrap" id="sanclist"></div><div class="pager" id="sancpager"></div></div>
   </section>
 
   <!-- ملفات القضايا -->
@@ -5969,11 +5843,9 @@ const CF={q:'',region:'',cat:''};
 const TITLE_DEFAULT='مركز أبو زبيدة للتتبع والرصد';
 const DESC={
  net:'حالة الاتصال بالإنترنت في دول المنطقة لحظياً. انقطاع الإنترنت كثيراً ما يسبق عملية عسكرية أو يرافقها. المصدر: مرصد IODA في معهد جورجيا للتقنية.',
- timeline:'تسلسل الأحداث يوماً بيوم لدولة أو قضية أو موضوع، مع عدد الأخبار والأحداث النوعية في كل يوم.',
- settings:'التحديث التلقائي، والإشعارات، والفتح من الجوال، ووضع الشاشة الكبيرة.',
- gdelt:'أخبار النزاعات والإرهاب من قاعدة GDELT العالمية، من الإعلام العبري والفارسي والتركي والروسي والعربي والفرنسي والدولي، مترجمة للعربية.',
+ settings:'التحديث التلقائي، والفتح من الجوال، ووضع الشاشة الكبيرة.',
  ask:'اسأل سؤالاً عادياً، فيجيبك المركز من الأخبار والدراسات التي رصدها، مع أرقام مصادر كل معلومة.',
- sanctions:'كل إضافة جديدة على قوائم العقوبات الأمريكية (OFAC) وقائمة مجلس الأمن الدولي، مع بحث في القوائم كاملة. تُحدَّث كل 6 ساعات.',
+ sanctions:'كل المصنَّفين إرهابياً على قائمة العقوبات الأمريكية (OFAC) وقائمة مجلس الأمن الدولي، مرتبين حسب الجماعة: داعش والقاعدة والنصرة وحزب الله والحرس الثوري وطالبان والشباب وغيرها، مع أحدث الإدراجات وبحث في القوائم كاملة.',
  cases:'اجمع الأخبار والدراسات المتعلقة بقضية تتابعها في ملف واحد، مع ملاحظاتك، وصدّرها تقريراً. كل مادة تُضاف تُؤرشف تلقائياً.',
  archive:'نسخ محفوظة من نصوص المقالات لحظة رصدها، تبقى حتى لو حُذفت من موقعها أو عُدّلت. وسجل بكل عنوان غيّرته صحيفته بعد النشر.',
  official:'بيانات وزارات الدفاع والخارجية والعدل والقيادات العسكرية والأمم المتحدة والناتو، وهي المصدر الأول قبل أن تعيد الصحف صياغتها.',
@@ -6000,8 +5872,8 @@ const DESC={
  books:'كتب صدرت خلال آخر سنتين عن الإرهاب والحروب والسياسة والأمن والاستخبارات، مع غلافها وملخصها المترجم ورابطها.',
  health:'حالة كل مصدر في آخر دورة جلب. المصادر التي لا يعمل رابطها تُجلب عبر بحث أخبار Google لنفس الموقع.'
 };
-const CODES={net:'SIGINT / INTERNET',timeline:'CHRONO / TIMELINE',settings:'SYSTEM / SETTINGS',gdelt:'SEC-12 / GDELT',ask:'QUERY / ASK',sanctions:'DESIGNATIONS / SANCTIONS',cases:'CASE FILES',archive:'EVIDENCE / ARCHIVE',official:'SEC-11 / OFFICIAL',map:'GEO / LIVE-MAP',alerts:'EARLY WARNING / ALERTS',bot:'RELAY / TELEGRAM-BOT',writer:'STUDIO / WRITER',qual:'CRITICAL / EVENTS',dash:'COMMAND / OVERVIEW',all:'ALL-SOURCES',world:'SEC-01 / GLOBAL',arab:'SEC-02 / ARAB',think_global:'SEC-03 / THINK-TANKS',think_arab:'SEC-04 / ARAB-RESEARCH',terror:'SEC-05 / COUNTER-TERRORISM',war:'SEC-06 / CONFLICT',economy:'SEC-07 / ECONOMY',tweets:'SEC-08 / TELEGRAM',keywords:'SEC-09 / WATCHLIST',intel:'SEC-10 / SECURITY-INTEL',countries:'GEO / COUNTRIES',books:'LIBRARY / BOOKS',centers:'DIRECTORY / CENTERS',saved:'ARCHIVE / SAVED',health:'SYSTEM / SOURCES'};
-const EXTRA={net:'رصد انقطاع الإنترنت',timeline:'الخط الزمني',settings:'الإعدادات',ask:'اسأل المركز',sanctions:'العقوبات والتصنيفات',cases:'ملفات القضايا',archive:'الأرشيف والعناوين المعدّلة',map:'الخريطة التفاعلية',alerts:'الإنذار المبكر',bot:'بوت تيليغرام',writer:'كاتب المقالات والدراسات',qual:'أخبار نوعية',dash:'لوحة القيادة',all:'كل الأخبار',countries:'الدول',books:'مكتبة الكتب',centers:'دليل المراكز',saved:'المحفوظات',health:'صحة المصادر والترجمة'};
+const CODES={net:'SIGINT / INTERNET',settings:'SYSTEM / SETTINGS',ask:'QUERY / ASK',sanctions:'DESIGNATIONS / SANCTIONS',cases:'CASE FILES',archive:'EVIDENCE / ARCHIVE',official:'SEC-11 / OFFICIAL',map:'GEO / LIVE-MAP',alerts:'EARLY WARNING / ALERTS',bot:'RELAY / TELEGRAM-BOT',writer:'STUDIO / WRITER',qual:'CRITICAL / EVENTS',dash:'COMMAND / OVERVIEW',all:'ALL-SOURCES',world:'SEC-01 / GLOBAL',arab:'SEC-02 / ARAB',think_global:'SEC-03 / THINK-TANKS',think_arab:'SEC-04 / ARAB-RESEARCH',terror:'SEC-05 / COUNTER-TERRORISM',war:'SEC-06 / CONFLICT',economy:'SEC-07 / ECONOMY',tweets:'SEC-08 / TELEGRAM',keywords:'SEC-09 / WATCHLIST',intel:'SEC-10 / SECURITY-INTEL',countries:'GEO / COUNTRIES',books:'LIBRARY / BOOKS',centers:'DIRECTORY / CENTERS',saved:'ARCHIVE / SAVED',health:'SYSTEM / SOURCES'};
+const EXTRA={net:'رصد انقطاع الإنترنت',settings:'الإعدادات',ask:'اسأل المركز',sanctions:'العقوبات والتصنيفات',cases:'ملفات القضايا',archive:'الأرشيف والعناوين المعدّلة',map:'الخريطة التفاعلية',alerts:'الإنذار المبكر',bot:'بوت تيليغرام',writer:'كاتب المقالات والدراسات',qual:'أخبار نوعية',dash:'لوحة القيادة',all:'كل الأخبار',countries:'الدول',books:'مكتبة الكتب',centers:'دليل المراكز',saved:'المحفوظات',health:'صحة المصادر والترجمة'};
 const P={
  radar:'<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><path d="M12 12l6.4-6.4"/>',
  grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
@@ -6037,7 +5909,7 @@ const P={
  pdf:'<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M9 13h6M9 16h4"/>',
  swap:'<path d="M7 7h12l-3-3M17 17H5l3 3"/>'
 };
-const CICON={net:'wifi',timeline:'clock',settings:'gear',gdelt:'globe',ask:'search',sanctions:'shield',cases:'centers',archive:'bookmark',official:'columns',map:'globe',alerts:'bell',bot:'send',writer:'pen',qual:'bolt',dash:'radar',all:'grid',world:'globe',arab:'news',think_global:'columns',think_arab:'building',terror:'shield',war:'target',economy:'chart',tweets:'send',keywords:'search',intel:'lock',countries:'flag',country:'flag',books:'book',centers:'centers',saved:'bookmark',health:'pulse'};
+const CICON={net:'wifi',settings:'gear',ask:'search',sanctions:'shield',cases:'centers',archive:'bookmark',official:'columns',map:'globe',alerts:'bell',bot:'send',writer:'pen',qual:'bolt',dash:'radar',all:'grid',world:'globe',arab:'news',think_global:'columns',think_arab:'building',terror:'shield',war:'target',economy:'chart',tweets:'send',keywords:'search',intel:'lock',countries:'flag',country:'flag',books:'book',centers:'centers',saved:'bookmark',health:'pulse'};
 const ico=(n)=>`<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${P[n]||''}</svg>`;
 
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -6131,7 +6003,7 @@ function navi(key,name,color,count,ratio){return `<button class="navi${S.cat===k
 function renderNav(){
  const sum=META.categories.reduce((a,c)=>a+c.day,0);
  const max=Math.max(1,...META.categories.map(c=>c.day));
- let h='<div class="navgrp">COMMAND</div>'+navi('dash','لوحة القيادة','var(--acc)','')+navi('qual','أخبار نوعية','var(--red)',QSTATS?QSTATS.total:'')+navi('alerts','الإنذار المبكر','#F59E0B',ALN||'')+navi('map','الخريطة التفاعلية','var(--acc)','')+navi('net','انقطاع الإنترنت','#A78BFA',NETBAD||'')+navi('timeline','الخط الزمني','var(--acc)','')+navi('ask','اسأل المركز','var(--acc)','')+navi('all','كل الأخبار','var(--acc)',sum);
+ let h='<div class="navgrp">COMMAND</div>'+navi('dash','لوحة القيادة','var(--acc)','')+navi('qual','أخبار نوعية','var(--red)',QSTATS?QSTATS.total:'')+navi('alerts','الإنذار المبكر','#F59E0B',ALN||'')+navi('map','الخريطة التفاعلية','var(--acc)','')+navi('net','انقطاع الإنترنت','#A78BFA',NETBAD||'')+navi('ask','اسأل المركز','var(--acc)','')+navi('all','كل الأخبار','var(--acc)',sum);
  h+='<div class="navgrp">SECTIONS / الأقسام</div>';
  META.categories.forEach(c=>h+=navi(c.key,c.name,c.color,c.day,c.key==='tweets'||c.key==='keywords'?null:c.day/max));
  h+='<div class="navgrp">TOOLS / الأدوات</div>'+navi('centers','دليل المراكز','var(--acc)',CENTERS.length||'')+navi('countries','الدول','var(--acc)',CTY.length||'')+navi('books','مكتبة الكتب','var(--gold)',BOOKS_N||'')+navi('writer','كاتب المقالات','var(--acc)','')+navi('bot','بوت تيليغرام','#38BDF8',BOTON?'يعمل':'')+navi('sanctions','العقوبات والتصنيفات','#E11D48',META.sanc_new||'')+navi('cases','ملفات القضايا','var(--gold)','')+navi('archive','الأرشيف','var(--acc)','')+navi('saved','المحفوظات','var(--gold)',savedList().length||'')+navi('settings','الإعدادات','var(--muted)','')+navi('health','صحة المصادر والترجمة',META.health.fail||META.tr_stats.down?'var(--red)':'var(--green)',META.health.fail?META.health.fail+' متعطل':'');
@@ -6168,9 +6040,9 @@ function setView(cat){
  S.cat=cat;S.source='';S.tag='';S.page=1;if(cat!=='center')S.center='';if(cat!=='country')S.country='';
  $('#title').textContent=EXTRA[cat]||CAT[cat]?.name||'';
  $('#desc').textContent=DESC[cat]||'';$('#pcode').textContent=CODES[cat]||'';
- const feedViews=!['dash','tweets','centers','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','net','timeline','settings'].includes(cat);
+ const feedViews=!['dash','tweets','centers','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','net','settings'].includes(cat);
  $('#mapview').hidden=cat!=='map';$('#alertsview').hidden=cat!=='alerts';
- $('#netview').hidden=cat!=='net';$('#tlview').hidden=cat!=='timeline';$('#setview').hidden=cat!=='settings';
+ $('#netview').hidden=cat!=='net';$('#setview').hidden=cat!=='settings';
  $('#askview').hidden=cat!=='ask';$('#sancview').hidden=cat!=='sanctions';$('#casesview').hidden=cat!=='cases';$('#archview').hidden=cat!=='archive';
  $('#writerview').hidden=cat!=='writer';
  $('#botview').hidden=cat!=='bot';
@@ -6204,7 +6076,6 @@ function setView(cat){
  if(cat==='cases')return loadCases();
  if(cat==='archive')return loadArch();
  if(cat==='net')return loadNet();
- if(cat==='timeline')return initTimeline();
  if(cat==='settings')return loadSettings();
  if(cat==='alerts')return loadAlerts();
  if(cat==='center')renderCenterHead();
@@ -6346,7 +6217,7 @@ async function renderCountryHead(){
   $('#countryhead').innerHTML=`<button class="back" data-cat="countries">${ico('arrow')}كل الدول</button>
   <div class="box chero" style="--c:var(--acc)"><span class="iso big">${esc(d.iso||'—')}</span>
    <div class="grow"><h1>${esc(name)}</h1><div class="cmeta">${d.region?`<span class="pill">${esc(d.region)}</span>`:''}${d.cats.slice(0,4).map(c=>`<span>${esc(CAT[c.cat]?.name||c.cat)}: ${c.count}</span>`).join('')}</div></div>
-   <div class="num"><b>${d.count}</b><span>مادة خلال الشهر</span></div><button class="ibtn" data-tlcountry="${esc(name)}">${ico('clock')}الخط الزمني</button></div>
+   <div class="num"><b>${d.count}</b><span>مادة خلال الشهر</span></div></div>
   ${d.tags.length?`<div class="box ctopics"><div class="tags" style="padding:0"><span class="clbl">مواضيع مرتبطة:</span>
    <button class="tag${!S.tag?' on':''}" data-ctag="">كل المواضيع</button>
    ${d.tags.map(t=>`<button class="tag${S.tag===t.tag?' on':''}" data-ctag="${esc(t.tag)}">${esc(t.tag)} <em>${t.count}</em></button>`).join('')}</div></div>`:''}`}catch(e){}}
@@ -6432,23 +6303,25 @@ function askRender(done){const h=md(ASKTXT).replace(/\[(\d+(?:\s*[،,]\s*\d+)*)\
 $('#askq').addEventListener('keydown',e=>{if(e.key==='Enter')askGo()});
 
 /* العقوبات والتصنيفات */
-let SANCMODE='new',sqt;
+let SANCMODE='terror',SANCGROUP='',SANCPAGE=1,sqt;
 async function loadSanc(){
- try{const d=await api('/api/sanctions?'+new URLSearchParams({mode:SANCMODE,q:$('#sancq').value.trim(),terror:$('#sancterror').checked?'1':''}));
+ $('#sancterrorlbl').hidden=SANCMODE==='terror';$('#sancgroups').hidden=SANCMODE!=='terror';
+ try{const d=await api('/api/sanctions?'+new URLSearchParams({mode:SANCMODE,group:SANCGROUP,page:SANCPAGE,q:$('#sancq').value.trim(),terror:$('#sancterror').checked?'1':''}));
   const st=d.state;
   $('#sanclists').innerHTML=d.lists.map(l=>`<div class="box sl"><b>${esc(l.name)}</b><span><span class="n">${l.count||0}</span> اسماً</span>
    <span class="wstat">${l.ok===1?'<span class="ok">● تعمل</span>':(l.ok===0?'<span class="bad">● متعطلة</span>':'● لم تُنزَّل بعد')}${l.last_ok?' · آخر نجاح '+ago(l.last_ok):''}</span>
-   ${l.ok===0&&l.error?`<span class="e">${esc(l.error)}</span>`:''}</div>`).join('');
-  $('#sanccount').textContent=st.running?'جارٍ تنزيل القوائم…':(d.last?'آخر محاولة '+ago(d.last):'');
+   ${l.ok===0&&l.error?`<span class="e">${esc(l.error)}</span>`:''}</div>`).join('')+`<div class="box sl"><b>المصنَّفون إرهابياً في القائمتين</b><span><span class="n">${d.terror_total||0}</span> فرداً وكياناً</span><span class="wstat">داعش والقاعدة والنصرة وحزب الله والحرس الثوري وغيرها</span></div>`;
+  $('#sanccount').textContent=st.running?'جارٍ تنزيل القوائم…':`${d.total} نتيجة`+(d.last?' · آخر تحديث '+ago(d.last):'');
   $('#sancref').disabled=!!st.running;
   if(st.running)setTimeout(()=>S.cat==='sanctions'&&loadSanc(),8000);
-  const none=!d.lists.some(l=>l.count);
-  if(none){$('#sanclist').innerHTML=`<div class="empty"><b>${st.running?'يجري تنزيل القوائم الآن، انتظر دقيقة':'لم تُنزَّل القوائم بعد'}</b>${st.running?'':'اضغط «تحديث القوائم».'} ${!d.curl_cffi&&d.lists.some(l=>l.ok===0)?'<br>إن تكرر الفشل فثبّت مكتبة curl_cffi (يثبّتها ملف التشغيل تلقائياً)، فهي تتجاوز حماية موقع الأمم المتحدة.':''}</div>`;return}
+  $('#sancgroups').innerHTML=`<button class="qt${!SANCGROUP?' on':''}" data-sgroup="" style="--e:var(--red)">كل الجماعات <b>${d.terror_total||0}</b></button>`+d.groups.map(g=>`<button class="qt${SANCGROUP===g.name?' on':''}" data-sgroup="${esc(g.name)}" style="--e:#E11D48"><i></i>${esc(g.name)} <b>${g.count}</b></button>`).join('');
+  if(!d.lists.some(l=>l.count)){$('#sanclist').innerHTML=`<div class="empty"><b>${st.running?'يجري تنزيل القوائم الآن، انتظر دقيقة':'لم تُنزَّل القوائم بعد'}</b>${st.running?'':'اضغط «تحديث القوائم».'}</div>`;$('#sancpager').innerHTML='';return}
   const typ=t=>t==='individual'?'فرد':(t==='vessel'?'سفينة':(t==='aircraft'?'طائرة':'كيان'));
-  $('#sanclist').innerHTML=d.items.length?`<table class="tbl"><thead><tr><th>الاسم</th><th>النوع</th><th>القائمة والبرنامج</th><th>تفاصيل</th><th>تاريخ الإدراج</th></tr></thead><tbody>${d.items.map(r=>`<tr><td><span class="sname">${esc(r.name)}</span>${r.is_new?' <span class="newdot">جديد</span>':''}</td><td>${typ(r.type)}</td><td>${esc(r.list)}<span class="sub">${(r.program_ar||'').split('، ').filter(Boolean).map(p=>`<span class="pg${/إرهاب|داعش|القاعدة|طالبان|حزب الله|الحرس/.test(p)?' t':''}">${esc(p)}</span>`).join('')}</span></td><td style="max-width:420px"><span class="sub" dir="auto" style="margin:0">${esc((r.remarks||'').slice(0,260))}</span></td><td class="mt" style="white-space:nowrap">${r.listed?esc(r.listed):(r.is_new?'رُصد '+fmt(r.first_seen):'—')}</td></tr>`).join('')}</tbody></table>`
-   :`<div class="empty"><b>لا نتائج</b>${$('#sancterror').checked?'ألغِ خيار «الإرهاب فقط» لترى كل البرامج، أو ':''}جرّب اسماً آخر.</div>`;
+  $('#sanclist').innerHTML=d.items.length?`<table class="tbl"><thead><tr><th>الاسم</th><th>النوع</th><th>الجماعة</th><th>القائمة والبرنامج</th><th>تفاصيل</th><th>تاريخ الإدراج</th></tr></thead><tbody>${d.items.map(r=>`<tr><td><span class="sname">${esc(r.name)}</span>${r.is_new?' <span class="newdot">جديد</span>':''}</td><td>${typ(r.type)}</td><td>${(r.groups||'').split('|').filter(Boolean).map(g=>`<span class="pg t">${esc(g)}</span>`).join('')||'—'}</td><td>${esc(r.list)}<span class="sub">${(r.program_ar||'').split('، ').filter(Boolean).slice(0,4).map(p=>`<span class="pg">${esc(p)}</span>`).join('')}</span></td><td style="max-width:380px"><span class="sub" dir="auto" style="margin:0">${esc((r.remarks||'').slice(0,240))}</span></td><td class="mt" style="white-space:nowrap">${r.listed?esc(r.listed):(r.is_new?'رُصد '+fmt(r.first_seen):'—')}</td></tr>`).join('')}</tbody></table>`
+   :'<div class="empty"><b>لا نتائج</b>جرّب اسماً آخر أو جماعة أخرى.</div>';
+  $('#sancpager').innerHTML=d.pages>1?`<button class="ibtn" data-spg="${d.page-1}" ${d.page<=1?'disabled':''}>السابق</button><span class="mt">صفحة ${d.page} من ${d.pages}</span><button class="ibtn" data-spg="${d.page+1}" ${d.page>=d.pages?'disabled':''}>التالي</button>`:'';
  }catch(e){$('#sanclist').innerHTML='<div class="empty"><b>تعذّر الاتصال بالبرنامج</b></div>'}}
-$('#sancq').oninput=()=>{clearTimeout(sqt);sqt=setTimeout(loadSanc,400)};$('#sancterror').onchange=loadSanc;
+$('#sancq').oninput=()=>{clearTimeout(sqt);sqt=setTimeout(()=>{SANCPAGE=1;loadSanc()},400)};$('#sancterror').onchange=()=>{SANCPAGE=1;loadSanc()};
 
 /* ملفات القضايا */
 let CASE=null,PICKITEM=null,CASES=[];
@@ -6458,7 +6331,7 @@ async function loadCases(){try{const d=await api('/api/cases');CASES=d.items;
 async function openCase(cid){CASE=cid;document.querySelectorAll('[data-case]').forEach(b=>b.classList.toggle('on',b.dataset.case===cid));
  try{const d=await api('/api/cases/'+cid);const c=d.case;
   d.items.forEach(i=>ITEMS.has(i.id)||ITEMS.set(i.id,i));
-  $('#casedetail').innerHTML=`<div class="boxh"><input id="ctitle" value="${esc(c.title)}" style="flex:1;font:700 15px var(--fd);background:none;border:0;color:var(--text)"><button class="ibtn" data-tlcase="${cid}">${ico('clock')}الخط الزمني</button><a class="ibtn" href="/print/case/${cid}" target="_blank" rel="noopener">${ico('pdf')}تقرير PDF</a><button class="ibtn" id="casesave">حفظ</button><button class="ibtn" id="casedel" style="color:var(--red)">حذف</button></div>
+  $('#casedetail').innerHTML=`<div class="boxh"><input id="ctitle" value="${esc(c.title)}" style="flex:1;font:700 15px var(--fd);background:none;border:0;color:var(--text)"><a class="ibtn" href="/print/case/${cid}" target="_blank" rel="noopener">${ico('pdf')}تقرير PDF</a><button class="ibtn" id="casesave">حفظ</button><button class="ibtn" id="casedel" style="color:var(--red)">حذف</button></div>
    <div style="padding:10px 16px"><textarea id="cdescr" placeholder="وصف القضية أو فرضيتها…" style="width:100%;min-height:50px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);padding:8px 10px;color:var(--text);font:14px 'IBM Plex Sans Arabic'">${esc(c.descr||'')}</textarea></div>
    ${d.items.length?d.items.map(i=>`<div class="citem"><div class="meta"><span class="src" style="--c:${CAT[i.cat]?.color||'var(--acc)'}">${esc(i.source_ar)}</span><span>${fmt(i.published)}</span>${i.archived?'<span class="badge seen">مؤرشف</span>':''}</div><h4><button class="ttl" data-open="${i.id}">${esc(i.title_ar||i.title)}</button></h4>
     <textarea data-noteof="${i.id}" placeholder="ملاحظتك على هذه المادة…">${esc(i.note||'')}</textarea>
@@ -6506,42 +6379,8 @@ async function loadNet(){try{const d=await api('/api/net');NETBAD=d.countries.fi
  $('#netlast').textContent=d.error?'تعذّر التحديث: '+d.error:(d.last?'آخر تحديث '+ago(d.last):'أول تحديث بعد دقيقة من التشغيل');
  $('#netrecent').innerHTML=d.recent.length?`<table class="tbl"><thead><tr><th>الدولة</th><th>المستوى</th><th>المؤشر</th><th>الانخفاض</th><th>الوقت</th></tr></thead><tbody>${d.recent.map(r=>`<tr><td>${esc(r.name)}</td><td style="color:${NLV[r.level][0]};font-weight:700">${NLV[r.level][1]}</td><td>${esc(r.source_ar)}</td><td class="mt">${r.value!=null&&r.hist?Math.max(0,Math.round((1-r.value/r.hist)*100))+'%':'—'}</td><td class="mt" style="white-space:nowrap">${fmt(r.ts)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty"><b>لا انقطاعات مرصودة خلال 48 ساعة</b>يفحص المركز كل 10 دقائق. أي انقطاع حرج يظهر هنا وعلى الخريطة، ويُطلق إنذاراً مبكراً وإشعاراً.</div>'}catch(e){}}
 
-/* الخط الزمني */
-const TL={country:'',case:'',q:'',days:7};let tlt;
-async function initTimeline(){
- if(!CTY.length){try{await loadCty()}catch(e){}}
- $('#tlcountry').innerHTML='<option value="">كل الدول</option>'+CTY.map(c=>`<option${c.name===TL.country?' selected':''}>${esc(c.name)}</option>`).join('');
- try{const cs=(await api('/api/cases')).items;$('#tlcase').innerHTML='<option value="">بدون ملف قضية</option>'+cs.map(c=>`<option value="${c.id}"${c.id===TL.case?' selected':''}>${esc(c.title)}</option>`).join('')}catch(e){}
- $('#tlq').value=TL.q;loadTimeline()}
-async function loadTimeline(){
- const prm=new URLSearchParams({country:TL.country,case:TL.case,q:TL.q,days:TL.days,qual:$('#tlqual').checked?'1':''});
- try{const d=await api('/api/timeline?'+prm);
-  const mx=Math.max(1,...d.days.map(x=>x.total));const step=Math.ceil(d.days.length/10);
-  $('#tlchart').innerHTML=`<div class="tlbars">${d.days.map((x,i)=>`<div class="tlbar" title="${x.day}: ${x.total} خبراً، منها ${x.qual} نوعياً"><i style="height:${Math.round((x.total-x.qual)/mx*100)}px"></i><i class="q" style="height:${Math.round(x.qual/mx*100)}px"></i>${i%step===0?`<span>${x.day.slice(5)}</span>`:''}</div>`).join('')}</div><div class="tllegend"><span><i style="background:var(--acc);opacity:.45"></i>كل الأخبار</span><span><i style="background:var(--red)"></i>الأحداث النوعية</span><span>${d.items.length} حدثاً في القائمة</span></div>`;
-  d.items.forEach(i=>ITEMS.has(i.id)||ITEMS.set(i.id,i));
-  let h='',day='';
-  d.items.forEach(i=>{const dd=new Date(i.published*1000).toLocaleDateString('ar',{weekday:'long',day:'numeric',month:'long'});if(dd!==day){day=dd;h+=`<div class="tlday">${esc(dd)}</div>`}
-   const e1=(i.events||'').split('|').filter(Boolean)[0];
-   h+=`<button class="tlit" data-open="${i.id}" style="--e:${EVC[e1]||'var(--border2)'}"><time>${hm(i.published)}</time><span><span class="meta">${evHtml(i.events)}${(i.countries||'').split('|').filter(Boolean).slice(0,3).map(c=>`<span>${esc(c)}</span>`).join('')}<span>${esc(i.source_ar)}</span></span><span class="t">${esc(i.title_ar||i.title)}</span></span></button>`});
-  $('#tllist').innerHTML=h||'<div class="empty"><b>لا أحداث في هذه المدة</b>جرّب مدة أطول، أو ألغِ خيار «الأحداث النوعية فقط».</div>';
- }catch(e){}}
-$('#tlcountry').onchange=e=>{TL.country=e.target.value;if(TL.country){TL.case='';$('#tlcase').value=''}loadTimeline()};
-$('#tlcase').onchange=e=>{TL.case=e.target.value;if(TL.case){TL.country='';$('#tlcountry').value=''}loadTimeline()};
-$('#tlq').oninput=e=>{clearTimeout(tlt);tlt=setTimeout(()=>{TL.q=e.target.value.trim();loadTimeline()},400)};
-$('#tlqual').onchange=loadTimeline;
-
 /* الإعدادات */
 async function loadSettings(){
- try{const d=await api('/api/notify');const c=d.cfg;
-  const ck=(k,l,sub)=>`<label class="opt"><input type="checkbox" data-nopt="${k}"${c[k]?' checked':''}><span>${l}${sub?`<small style="display:block;color:var(--faint);font-size:12px">${sub}</small>`:''}</span></label>`;
-  $('#notifbox').innerHTML=`<b style="font:700 14px var(--fd)">إشعارات ويندوز</b>${d.windows?'':'<span class="warn" style="font-size:12.5px">الإشعارات تعمل على ويندوز فقط.</span>'}
-   ${ck('on','تشغيل الإشعارات','تظهر في زاوية الشاشة حتى لو كانت نافذة البرنامج مصغّرة')}
-   ${ck('qual','الأخبار النوعية','غارات وانفجارات واعتقالات… (إشعار واحد على الأكثر كل دقيقتين، يجمع ما وصل)')}
-   ${ck('alerts','الإنذارات المبكرة','الارتفاع المفاجئ والتصاعد الميداني')}
-   ${ck('net','انقطاع الإنترنت','انقطاع حرج في دولة')}
-   ${ck('sound','صوت مع الإشعار','')}
-   <div class="row"><span style="font-size:13px">أخبار نوعية من هذه الدول فقط (اتركه فارغاً لكل الدول):</span><input id="ncountries" value="${esc(c.countries||'')}" placeholder="مثل: سوريا، لبنان، العراق" style="flex:1;min-width:200px;height:34px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);padding:0 10px;color:var(--text)"><button class="ibtn" id="nsave">حفظ</button></div>
-   <div class="row"><button class="ibtn primary" id="ntest">إرسال إشعار تجريبي</button></div>`}catch(e){}
  try{LANS=await api('/api/settings');$('#setlan').innerHTML=lanHtml()}catch(e){}
  loadUpdBox()}
 async function loadUpdBox(){try{const d=await api('/api/update');const c=d.cfg,st=d.state;
@@ -6553,7 +6392,6 @@ async function loadUpdBox(){try{const d=await api('/api/update');const c=d.cfg,s
   <div class="row"><button class="ibtn primary" id="updcheck">تحقق من التحديث الآن</button>${st.ready?'<button class="ibtn" id="updgo2">إعادة التشغيل لتطبيقه</button>':''}</div>`}catch(e){}}
 function updBanner(){const u=META?.update;if(u&&u.ready&&!sessionStorage.getItem('upd_later')){$('#updtxt').textContent=`🔄 نُزِّل تحديث جديد للمركز${u.version?' (الإصدار '+u.version+')':''}. أعد التشغيل لتطبيقه.`;$('#updbar').hidden=false}else $('#updbar').hidden=true}
 document.addEventListener('change',e=>{if(e.target.id==='updauto')api('/api/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auto:e.target.checked})}).then(()=>toast('حُفظ'))});
-document.addEventListener('change',e=>{if(e.target.dataset.nopt)api('/api/notify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({[e.target.dataset.nopt]:e.target.checked})}).then(()=>toast('حُفظ'))});
 
 /* وضع الشاشة الكبيرة */
 let WALL={i:0,map:null,layer:null},WSLIDES=['الخريطة الحية','الأحداث النوعية','الإنذارات وحالة الإنترنت','الدول الأكثر حضوراً'];
@@ -6594,8 +6432,7 @@ function cmdFill(qq){const n=nrm(qq.trim());const out=[];
  const pool=n?[...views,...ctys,...ctrs].filter(o=>nrm(o.t).includes(n)):views;
  out.push(...pool.slice(0,9));
  if(n){out.push({ic:'search',t:`ابحث في الأخبار عن: ${qq.trim()}`,k:'بحث',run:()=>{$('#q').value=qq.trim();S.q=qq.trim();setView('all')}});
-  out.push({ic:'search',t:`اسأل المركز: ${qq.trim()}`,k:'سؤال',run:()=>{setView('ask');$('#askq').value=qq.trim();askGo()}});
-  out.push({ic:'clock',t:`الخط الزمني لـ: ${qq.trim()}`,k:'خط زمني',run:()=>{TL.q=qq.trim();TL.country='';TL.case='';setView('timeline')}})}
+  out.push({ic:'search',t:`اسأل المركز: ${qq.trim()}`,k:'سؤال',run:()=>{setView('ask');$('#askq').value=qq.trim();askGo()}});}
  out.push({ic:'screen',t:'وضع الشاشة الكبيرة',k:'أمر',run:wallStart});
  CMDI=out;CMDS=0;cmdDraw()}
 function cmdDraw(){$('#cmdlist').innerHTML=CMDI.map((o,i)=>`<li class="${i===CMDS?'on':''}" data-cmdi="${i}">${ico(o.ic)}<span>${esc(o.t)}</span><span class="k">${esc(o.k)}</span></li>`).join('');
@@ -6890,7 +6727,7 @@ async function poll(){
   if(S.cat==='bot')return loadBot(true);
   if(S.cat==='map')return loadMap(true);
   if(S.cat==='net')return loadNet();
-  if(['ask','sanctions','cases','archive','timeline','settings'].includes(S.cat))return;
+  if(['ask','sanctions','cases','archive','settings'].includes(S.cat))return;
   if(S.cat==='alerts')return loadAlerts();
   if(['saved','centers','countries','books','writer'].includes(S.cat))return;
   const d=await api('/api/items?'+params(1,50));
@@ -7020,15 +6857,14 @@ document.addEventListener('click',e=>{
  if(ds.qf!==undefined){QF=ds.qf;QITEMS=[];return loadQualBox()}
  if(ds.qgo!==undefined)return showQ(+ds.qgo);
  if(ds.cluster){openCluster(ds.cluster);return}
- if(ds.tld){TL.days=+ds.tld;document.querySelectorAll('#tldays button').forEach(b=>b.classList.toggle('on',b===t));return loadTimeline()}
- if(ds.tlcountry!==undefined){TL.country=ds.tlcountry;TL.case='';TL.q='';setView('timeline');return}
- if(ds.tlcase!==undefined){TL.case=ds.tlcase;TL.country='';TL.q='';setView('timeline');return}
  if(ds.nset!==undefined){return}
  if(ds.edits)return openItem(ds.edits);
  if(ds.arch){t.disabled=true;api('/api/archive/'+ds.arch,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:'يدوي'})}).then(()=>toast('أُرشف المقال، وتُرسل نسخة إلى أرشيف الإنترنت')).catch(()=>toast('تعذّرت الأرشفة'));return}
  if(ds.tocase)return pickCase(ds.tocase);
  if(ds.pickcase){addToCase(ds.pickcase,PICKITEM);return}
- if(ds.stab){SANCMODE=ds.stab;document.querySelectorAll('#sanctabs button').forEach(b=>b.classList.toggle('on',b===t));return loadSanc()}
+ if(ds.sgroup!==undefined){SANCGROUP=ds.sgroup;SANCPAGE=1;return loadSanc()}
+ if(ds.spg){SANCPAGE=+ds.spg;$('#sanclist').scrollIntoView({block:'start'});return loadSanc()}
+ if(ds.stab){SANCMODE=ds.stab;SANCPAGE=1;document.querySelectorAll('#sanctabs button').forEach(b=>b.classList.toggle('on',b===t));return loadSanc()}
  if(ds.atab){ATAB=ds.atab;APAGE=1;document.querySelectorAll('[data-atab]').forEach(b=>b.classList.toggle('on',b===t));return loadArch()}
  if(ds.ah!==undefined){AH=+ds.ah;APAGE=1;document.querySelectorAll('#archhours button').forEach(b=>b.classList.toggle('on',b===t));return loadArch()}
  if(ds.apg){APAGE=+ds.apg;$('#archbox').scrollIntoView({block:'start'});return loadArch()}
@@ -7057,7 +6893,7 @@ document.addEventListener('click',e=>{
  if(ds.blang!==undefined){BF.lang=ds.blang;document.querySelectorAll('#blang button').forEach(b=>b.classList.toggle('on',b===t));return loadBooks()}
  if(ds.book)return openBook(ds.book);
  if(ds.booktr)return translateBook(ds.booktr);
- if(ds.tag){$('#dlg').open&&$('#dlg').close();if(['saved','health','centers','dash','tweets','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','net','timeline','settings'].includes(S.cat))setView('all');S.tag=ds.tag;renderActiveTag();if(S.cat==='center')renderCenterHead();if(S.cat==='country')renderCountryHead();if(META)renderTags();load(true);return}
+ if(ds.tag){$('#dlg').open&&$('#dlg').close();if(['saved','health','centers','dash','tweets','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','net','settings'].includes(S.cat))setView('all');S.tag=ds.tag;renderActiveTag();if(S.cat==='center')renderCenterHead();if(S.cat==='country')renderCountryHead();if(META)renderTags();load(true);return}
  if(ds.hours!==undefined){S.hours=+ds.hours;document.querySelectorAll('#hours button').forEach(b=>b.classList.toggle('on',b===t));if(S.cat!=='saved')load(true);return}
  if(ds.cregion!==undefined){CF.region=ds.cregion;document.querySelectorAll('#cregion button').forEach(b=>b.classList.toggle('on',b===t));return renderCenterGrid()}
  if(ds.ccat!==undefined){CF.cat=ds.ccat;document.querySelectorAll('#ccat button').forEach(b=>b.classList.toggle('on',b===t));return renderCenterGrid()}
@@ -7069,8 +6905,6 @@ document.addEventListener('click',e=>{
  if(t.id==='wallbtn'||t.id==='wallgo')return wallStart();
  if(t.id==='wallexit')return wallStop();
  if(t.id==='cmdbtn')return cmdOpen();
- if(t.id==='ntest'){api('/api/notify/test',{method:'POST'}).then(d=>toast(d.windows?'أُرسل إشعار تجريبي، انظر زاوية الشاشة':'الإشعارات تعمل على ويندوز فقط'));return}
- if(t.id==='nsave'){api('/api/notify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({countries:$('#ncountries').value})}).then(()=>toast('حُفظ'));return}
  if(t.id==='askgo')return askGo();
  if(t.id==='askcopy')return navigator.clipboard.writeText(ASKTXT).then(()=>toast('نُسخت الإجابة'));
  if(t.id==='archclear'){const lbl=AH?`أرشيف آخر ${AH==24?'24 ساعة':AH==168?'أسبوع':'شهر'}`:'الأرشيف كله';
@@ -7114,7 +6948,7 @@ $('#brefresh').onclick=async()=>{await api('/api/books/refresh',{method:'POST'})
 $('#dlgClose').onclick=()=>$('#dlg').close();
 $('#dlg').addEventListener('click',e=>{if(e.target.id==='dlg')$('#dlg').close()});
 $('#dlg').addEventListener('close',()=>{S.openId=null;CUR.id=null});
-let qt;$('#q').oninput=e=>{clearTimeout(qt);qt=setTimeout(()=>{S.q=e.target.value.trim();if(['health','centers','dash','tweets','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','net','timeline','settings'].includes(S.cat))setView('all');else if(S.cat==='saved')renderSaved();else load(true)},400)};
+let qt;$('#q').oninput=e=>{clearTimeout(qt);qt=setTimeout(()=>{S.q=e.target.value.trim();if(['health','centers','dash','tweets','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','net','settings'].includes(S.cat))setView('all');else if(S.cat==='saved')renderSaved();else load(true)},400)};
 document.addEventListener('keydown',e=>{if(e.key==='Enter'&&document.activeElement?.id==='qslide'){openItem(document.activeElement.dataset.open);return}if(e.key==='/'&&!['INPUT','SELECT'].includes(document.activeElement.tagName)){e.preventDefault();$('#q').focus()}});
 $('#refresh').onclick=async()=>{const d=await api('/api/refresh',{method:'POST'});toast(d.running?'دورة جلب جارية بالفعل':'بدأ تحديث جميع المصادر');$('#refresh').classList.add('spin');setTimeout(poll,4000)};
 function applySkin(t){if(!['neon','ops','gold','light'].includes(t))t='neon';document.documentElement.dataset.theme=t;document.querySelectorAll('[data-skin]').forEach(b=>b.classList.toggle('on',b.dataset.skin===t));lsSet('rased_skin',t)}
@@ -7149,6 +6983,7 @@ if('serviceWorker' in navigator&&(location.protocol==='https:'||['localhost','12
 # ───────────────────────── التشغيل ─────────────────────────
 if __name__ == "__main__":
     init_db()
+    cleanup_removed()
     repair_translations()
     load_sources()
     threading.Thread(target=fetch_loop, daemon=True).start()
@@ -7162,8 +6997,6 @@ if __name__ == "__main__":
     threading.Thread(target=sanctions_loop, daemon=True).start()
     threading.Thread(target=archiver_loop, daemon=True).start()
     threading.Thread(target=net_loop, daemon=True).start()
-    threading.Thread(target=gdelt_loop, daemon=True).start()
-    threading.Thread(target=notify_loop, daemon=True).start()
     threading.Thread(target=update_loop, daemon=True).start()
     RUN_HOST = "0.0.0.0" if kv_get("lan") == "1" else "127.0.0.1"
     if RUN_HOST == "0.0.0.0":

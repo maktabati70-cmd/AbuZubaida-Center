@@ -1,0 +1,12 @@
+# بيانات كل مستخدم تبقى على جهازه ولا تُرفع
+rased.db
+rased.db-*
+rased.log*
+rased_sources.json
+rased.py.bak
+rased.py.new
+app_window_profile/
+__pycache__/
+build/
+dist/
+*.exe
