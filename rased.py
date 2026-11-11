@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from urllib.parse import quote, quote_plus, urlparse
 
-VERSION = "2026.11.11.2"
+VERSION = "2026.11.11.3"
 
 # التشغيل بلا نافذة سوداء (pythonw أو exe بلا وحدة تحكم): نوجّه المخرجات إلى «لا شيء» حتى لا تتعطل الطباعة
 if sys.stdout is None or sys.stderr is None:
@@ -4235,12 +4235,48 @@ def api_update_restart():
     return jsonify(ok=True)
 
 
+MAP_GEO_UA = {"User-Agent": "AbuZubaidaCenter/1.0 (desktop news monitor)", "Accept-Language": "ar,en"}
+
+
+@app.get("/api/geo/<path:name>")
+def api_geo(name):
+    """حدود الدولة (GeoJSON مبسّط) من OpenStreetMap، تُحفظ محلياً بعد أول طلب."""
+    iso = COUNTRY_INFO.get(name, {}).get("iso", "")
+    if not re.fullmatch(r"[A-Z]{2}", iso or ""):
+        return jsonify(ok=False), 404
+    d = os.path.join(BASE_DIR, "geo")
+    pth = os.path.join(d, iso + ".json")
+    if os.path.exists(pth):
+        with open(pth, encoding="utf-8") as f:
+            return Response(f.read(), mimetype="application/json")
+    try:
+        r = requests.get("https://nominatim.openstreetmap.org/search", headers=MAP_GEO_UA, timeout=30,
+                         params={"country": iso, "format": "json", "polygon_geojson": 1, "polygon_threshold": 0.01,
+                                 "limit": 1, "featureType": "country"})
+        js = r.json() if r.status_code == 200 else []
+        if not js:
+            return jsonify(ok=False), 404
+        bb = [float(v) for v in js[0]["boundingbox"]]          # [جنوب، شمال، غرب، شرق]
+        out = json.dumps({"ok": True, "bbox": [[bb[0], bb[2]], [bb[1], bb[3]]], "geojson": js[0].get("geojson")})
+        os.makedirs(d, exist_ok=True)
+        with open(pth, "w", encoding="utf-8") as f:
+            f.write(out)
+        return Response(out, mimetype="application/json")
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)[:120]), 502
+
+
 @app.get("/api/map")
 def api_map():
     hours = min(int(request.args.get("hours") or 24), 24 * 7)
     t0 = now() - hours * 3600
-    rows = q("SELECT * FROM items WHERE events != '' AND events IS NOT NULL AND published >= ? "
-             "ORDER BY published DESC LIMIT 600", (t0,))
+    cty = (request.args.get("country") or "").strip()
+    if cty:
+        rows = q("SELECT * FROM items WHERE events != '' AND events IS NOT NULL AND published >= ? AND countries LIKE ? "
+                 "ORDER BY published DESC LIMIT 600", (t0, f"%|{cty}|%"))
+    else:
+        rows = q("SELECT * FROM items WHERE events != '' AND events IS NOT NULL AND published >= ? "
+                 "ORDER BY published DESC LIMIT 600", (t0,))
     pts = []
     for r in rows:
         loc = locate(r)
@@ -4255,12 +4291,17 @@ def api_map():
         dens.update(c for c in r["countries"].strip("|").split("|") if c in CENTROIDS)
     net = []
     for r in q("SELECT iso, name, MAX(CASE level WHEN 'critical' THEN 2 WHEN 'warning' THEN 1 ELSE 0 END) lv, MAX(ts) ts "
-               "FROM net_alerts WHERE ts >= ? AND level != 'normal' GROUP BY iso", (now() - 3 * 3600,)):
+               "FROM net_alerts WHERE ts >= ? AND level = 'critical' GROUP BY iso", (now() - 3 * 3600,)):
         if r["name"] in CENTROIDS:
             net.append({"name": r["name"], "lat": CENTROIDS[r["name"]][0], "lon": CENTROIDS[r["name"]][1],
                         "level": "critical" if r["lv"] == 2 else "warning", "ts": r["ts"]})
-    return jsonify(net=net, points=pts, density=[{"name": c, "lat": CENTROIDS[c][0], "lon": CENTROIDS[c][1], "count": n}
-                                        for c, n in dens.most_common(60)])
+    if cty:
+        net = [n_ for n_ in net if n_["name"] == cty]
+        dens = Counter({cty: dens.get(cty, 0)}) if dens.get(cty) else Counter()
+    clist = sorted(c for c in CENTROIDS if COUNTRY_INFO.get(c, {}).get("iso"))
+    return jsonify(net=net, points=pts, countries=clist, cent={c: CENTROIDS[c] for c in clist},
+                   density=[{"name": c, "lat": CENTROIDS[c][0], "lon": CENTROIDS[c][1], "count": n}
+                            for c, n in dens.most_common(60)])
 
 
 # ───────────────────────── الأرشيف ─────────────────────────
@@ -6399,12 +6440,6 @@ dialog::backdrop{background:rgba(2,5,10,.7);backdrop-filter:blur(3px)}
     <div id="ctygrid"></div>
   </section>
 
-  <!-- انقطاع الإنترنت -->
-  <section id="netview" hidden>
-    <div class="netgrid" id="netgrid"></div>
-    <div class="box" style="margin-top:16px"><div class="boxh">آخر تنبيهات الانقطاع (48 ساعة)<span class="sp"></span><span class="wstat" id="netlast"></span></div><div class="tablewrap" id="netrecent"></div></div>
-  </section>
-
   <!-- الإعدادات -->
   <section id="setview" hidden>
     <div class="box lanbox" id="updbox"></div>
@@ -6466,6 +6501,7 @@ dialog::backdrop{background:rgba(2,5,10,.7);backdrop-filter:blur(3px)}
         <span class="t">الأحداث النوعية على الخريطة</span>
         <div class="seg" id="maphours"><button data-mh="6">6 ساعات</button><button data-mh="24" class="on">يوم</button><button data-mh="72">3 أيام</button><button data-mh="168">أسبوع</button></div>
         <label class="opt" style="font-size:12.5px;white-space:nowrap">نوع الخريطة <select id="mapstyle" class="dsel" style="height:30px"><option value="general">عامة</option><option value="detailed">تفصيلية (مدن وقرى وطرق)</option><option value="satellite">قمر صناعي مع الأسماء</option><option value="terrain">تضاريس</option></select></label>
+        <label class="opt" style="font-size:12.5px;white-space:nowrap">الدولة <select id="mapcty" class="dsel" style="height:30px;flex:1"><option value="">الخريطة الكاملة</option></select></label>
         <div class="seg" id="mapzoom"><button data-mz="sy">سوريا</button><button data-mz="me">الشرق الأوسط</button><button data-mz="world">العالم</button></div>
         <label class="opt" style="font-size:12.5px"><input type="checkbox" id="mapdens" checked>كثافة الأخبار حسب الدولة</label>
         <div class="maplegend" id="maplegend"></div>
@@ -6619,7 +6655,7 @@ const DESC={
  archive:'نسخ محفوظة من نصوص المقالات لحظة رصدها، تبقى حتى لو حُذفت من موقعها أو عُدّلت. وسجل بكل عنوان غيّرته صحيفته بعد النشر.',
  official:'بيانات وزارات الدفاع والخارجية والعدل والقيادات العسكرية والأمم المتحدة والناتو، وهي المصدر الأول قبل أن تعيد الصحف صياغتها.',
  map:'كل خبر نوعي على الخريطة في موقعه: المدينة إن ذُكرت، أو الدولة. اضغط أي نقطة لتقرأ الخبر.',
- alerts:'ينبّهك المركز حين يقفز الحديث عن دولة أو موضوع فجأة فوق معدله المعتاد، أو حين تتوالى الأحداث النوعية في مكان واحد.',
+ alerts:'ينبّهك المركز حين يقفز الحديث عن دولة أو موضوع فجأة فوق معدله المعتاد، أو حين تتوالى الأحداث النوعية في مكان واحد، أو حين ينقطع الإنترنت انقطاعاً حرجاً في دولة.',
  bot:'يرسل البوت إلى قناتك أو مجموعتك في تيليغرام ملخص مقالة أو دراسة أو خبر عالمي مترجم مع رابطه، بالسرعة والفلتر اللذين تختارهما.',
  writer:'اكتب مقالاً أو دراسة أو تقدير موقف عن أي موضوع، يُكتب كاملاً تلقائياً مستنداً إلى ما رصده المركز. يعمل مجاناً فوراً دون مفتاح، أو عبر Gemini أو Ollama أو Claude.',
  qual:'الأحداث الميدانية المهمة تُلتقط تلقائياً من كل الأخبار وقنوات تيليغرام: غارات، مسيّرات، انفجارات، اشتباكات، اعتقالات، توغلات، اغتيالات.',
@@ -6678,7 +6714,7 @@ const P={
  pdf:'<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M9 13h6M9 16h4"/>',
  swap:'<path d="M7 7h12l-3-3M17 17H5l3 3"/>'
 };
-const CICON={daily:'pdf',net:'wifi',settings:'gear',ask:'search',sanctions:'shield',cases:'centers',archive:'bookmark',official:'columns',map:'globe',alerts:'bell',bot:'send',writer:'pen',qual:'bolt',dash:'radar',all:'grid',world:'globe',arab:'news',think_global:'columns',think_arab:'building',terror:'shield',war:'target',economy:'chart',tweets:'send',keywords:'search',intel:'lock',countries:'flag',country:'flag',books:'book',centers:'centers',saved:'bookmark',health:'pulse'};
+const CICON={daily:'pdf',settings:'gear',ask:'search',sanctions:'shield',cases:'centers',archive:'bookmark',official:'columns',map:'globe',alerts:'bell',bot:'send',writer:'pen',qual:'bolt',dash:'radar',all:'grid',world:'globe',arab:'news',think_global:'columns',think_arab:'building',terror:'shield',war:'target',economy:'chart',tweets:'send',keywords:'search',intel:'lock',countries:'flag',country:'flag',books:'book',centers:'centers',saved:'bookmark',health:'pulse'};
 const ico=(n)=>`<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${P[n]||''}</svg>`;
 
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -6772,7 +6808,7 @@ function navi(key,name,color,count,ratio){return `<button class="navi${S.cat===k
 function renderNav(){
  const sum=META.categories.reduce((a,c)=>a+c.day,0);
  const max=Math.max(1,...META.categories.map(c=>c.day));
- let h='<div class="navgrp">COMMAND</div>'+navi('dash','لوحة القيادة','var(--acc)','')+navi('daily','الملخص اليومي','var(--gold)','')+navi('qual','أخبار نوعية','var(--red)',QSTATS?QSTATS.total:'')+navi('alerts','الإنذار المبكر','#F59E0B','')+navi('map','الخريطة التفاعلية','var(--acc)','')+navi('net','انقطاع الإنترنت','#A78BFA',NETBAD||'')+navi('ask','اسأل المركز','var(--acc)','')+navi('all','كل الأخبار','var(--acc)',sum);
+ let h='<div class="navgrp">COMMAND</div>'+navi('dash','لوحة القيادة','var(--acc)','')+navi('daily','الملخص اليومي','var(--gold)','')+navi('qual','أخبار نوعية','var(--red)',QSTATS?QSTATS.total:'')+navi('alerts','الإنذار المبكر','#F59E0B','')+navi('map','الخريطة التفاعلية','var(--acc)','')+navi('ask','اسأل المركز','var(--acc)','')+navi('all','كل الأخبار','var(--acc)',sum);
  h+='<div class="navgrp">SECTIONS / الأقسام</div>';
  META.categories.forEach(c=>h+=navi(c.key,c.name,c.color,c.day,c.key==='tweets'||c.key==='keywords'?null:c.day/max));
  h+='<div class="navgrp">TOOLS / الأدوات</div>'+navi('centers','دليل المراكز','var(--acc)',CENTERS.length||'')+navi('countries','الدول','var(--acc)',CTY.length||'')+navi('books','مكتبة الكتب','var(--gold)',BOOKS_N||'')+navi('writer','كاتب المقالات','var(--acc)','')+(S.cat==='bot'?navi('bot','بوت تيليغرام','#38BDF8',BOTON?'يعمل':''):'')+navi('sanctions','العقوبات والتصنيفات','#E11D48',META.sanc_new||'')+navi('cases','ملفات القضايا','var(--gold)','')+navi('archive','الأرشيف','var(--acc)','')+navi('saved','المحفوظات','var(--gold)',savedList().length||'')+navi('settings','الإعدادات','var(--muted)','')+navi('health','صحة المصادر والترجمة',META.health.fail||META.tr_stats.down?'var(--red)':'var(--green)',META.health.fail?META.health.fail+' متعطل':'');
@@ -6811,7 +6847,7 @@ function setView(cat){
  $('#desc').textContent=DESC[cat]||'';$('#pcode').textContent=CODES[cat]||'';
  const feedViews=!['dash','tweets','centers','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','net','settings','daily'].includes(cat);
  $('#mapview').hidden=cat!=='map';$('#alertsview').hidden=cat!=='alerts';
- $('#netview').hidden=cat!=='net';$('#setview').hidden=cat!=='settings';
+ $('#setview').hidden=cat!=='settings';
  $('#askview').hidden=cat!=='ask';$('#sancview').hidden=cat!=='sanctions';$('#casesview').hidden=cat!=='cases';$('#archview').hidden=cat!=='archive';
  $('#writerview').hidden=cat!=='writer';
  $('#botview').hidden=cat!=='bot';$('#dailyview').hidden=cat!=='daily';
@@ -6845,7 +6881,6 @@ function setView(cat){
  if(cat==='sanctions')return loadSanc();
  if(cat==='cases')return loadCases();
  if(cat==='archive')return loadArch();
- if(cat==='net')return loadNet();
  if(cat==='settings')return loadSettings();
  if(cat==='alerts')return loadAlerts();
  if(cat==='center')renderCenterHead();
@@ -7000,7 +7035,7 @@ async function openCluster(cid){try{const d=await api('/api/cluster/'+encodeURIC
 /* الإنذار المبكر */
 let ALN=0,ALH=48,ALSEEN=+lsGet('rased_alseen','0');
 const LVC={3:'#F43F5E',2:'#F59E0B',1:'#38BDF8'};
-function alertHtml(a,now_){const tl=a.kind==='field'?'تصاعد ميداني':(a.kind==='country'?'ارتفاع مفاجئ':'موضوع صاعد');
+function alertHtml(a,now_){const tl=a.kind==='net'?'انقطاع إنترنت':(a.kind==='field'?'تصاعد ميداني':(a.kind==='country'?'ارتفاع مفاجئ':'موضوع صاعد'));
  const btn=a.kind==='topic'?`<button class="ibtn" data-altopic="${esc(a.key)}">عرض الأخبار</button>`:`<button class="ibtn" data-alcountry="${esc(a.key)}">عرض ${esc(a.key)}</button>`;
  return `<div class="al" style="--lc:${LVC[a.level]||LVC[2]}"><span class="lv">${a.level>=3?'إنذار عالٍ':'إنذار'}</span><div><b>${esc(a.msg)}</b><small>${tl} · ${ago(a.created)}</small></div><div class="acts2">${btn}${a.kind!=='topic'?`<button class="ibtn" data-cat="map">الخريطة</button>`:''}</div></div>`}
 async function loadAlertCount(){try{const d=await api('/api/alerts?hours=24');const fresh=d.items.filter(a=>a.created>ALSEEN);ALN=fresh.length;
@@ -7028,6 +7063,19 @@ const MSTYLES={detailed:{url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png',at
  satellite:{url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',attr:'&copy; Esri',max:19,labels:'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'},
  terrain:{url:'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',attr:'&copy; OpenTopoMap',max:17}};
 const MZOOM={sy:[[35.0,38.6],7],me:[[30,40],5],world:[[25,20],2]};
+let MAPCENT={},MAPCTY=lsGet('rased_mapcty',''),MAPCTY_DRAWN='',CTYLAYER=null;
+async function mapFocus(name){if(!MAP)return;MAPCTY_DRAWN=name;
+ if(CTYLAYER){MAP.removeLayer(CTYLAYER);CTYLAYER=null}
+ if(!name){MAP.setMaxBounds(null);MAP.setMinZoom(1);MAP.flyTo(MZOOM.me[0],MZOOM.me[1],{duration:.6});return}
+ try{const g=await api('/api/geo/'+encodeURIComponent(name));if(MAPCTY!==name)return;
+  const rings=[];const add=geo=>{if(!geo)return;if(geo.type==='Polygon')rings.push(geo.coordinates[0]);else if(geo.type==='MultiPolygon')geo.coordinates.forEach(pg=>rings.push(pg[0]))};add(g.geojson);
+  const world=[[-89.9,-179.9],[-89.9,179.9],[89.9,179.9],[89.9,-179.9]];
+  const holes=rings.map(r=>r.map(([x,y])=>[y,x]));
+  const dark=document.documentElement.dataset.theme!=='light';
+  CTYLAYER=L.layerGroup([L.polygon([world,...holes],{stroke:false,fillColor:dark?'#050B14':'#E5E9EF',fillOpacity:.88,interactive:false}),
+   L.geoJSON(g.geojson,{style:{color:'#38BDF8',weight:2.5,fill:false},interactive:false})]).addTo(MAP);
+  const b=L.latLngBounds(g.bbox);MAP.fitBounds(b,{padding:[20,20]});MAP.setMaxBounds(b.pad(.6));MAP.setMinZoom(Math.max(1,MAP.getBoundsZoom(b.pad(.6))-1));
+ }catch(e){const c=MAPCENT[name];MAP.setMaxBounds(null);MAP.setMinZoom(1);if(c)MAP.flyTo(c,6,{duration:.6})}}
 function applyMapStyle(){if(!MAP||!TILE)return;const st=MSTYLES[MAPSTYLE];
  TILE.options.maxZoom=st?st.max:18;MAP.setMaxZoom(st?st.max:18);TILE.options.attribution=st?st.attr:TILES[TIDX].attr;TILE.setUrl(tileUrl());tileFilter();
  if(LBL){MAP.removeLayer(LBL);LBL=null}
@@ -7046,7 +7094,9 @@ async function loadMap(refresh){
   TILE.on('tileerror',()=>{TERR++;if(TERR>=6&&TOK<3)nextTiles()});
   MLAYER=L.layerGroup().addTo(MAP);DLAYER=L.layerGroup().addTo(MAP);$('#mapstyle').value=MAPSTYLE;applyMapStyle();}
  TILE.setUrl(tileUrl());tileFilter();setTimeout(()=>MAP.invalidateSize(),60);
- let d;try{d=await api('/api/map?hours='+MAPH)}catch(e){return}
+ let d;try{d=await api('/api/map?hours='+MAPH+(MAPCTY?'&country='+encodeURIComponent(MAPCTY):''))}catch(e){return}
+ if(d.cent)MAPCENT=d.cent;const sel=$('#mapcty');if(sel.options.length<2&&d.countries){sel.innerHTML='<option value="">الخريطة الكاملة</option>'+d.countries.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('')}
+ sel.value=MAPCTY;if(MAPCTY&&MAPCTY_DRAWN!==MAPCTY)mapFocus(MAPCTY);
  MLAYER.clearLayers();DLAYER.clearLayers();
  (d.net||[]).forEach(n=>{const col=n.level==='critical'?'#A855F7':'#C4B5FD';
   L.circleMarker([n.lat,n.lon],{radius:16,color:col,weight:2,dashArray:'4 4',fill:true,fillColor:col,fillOpacity:.12}).bindTooltip(`انقطاع إنترنت ${n.level==='critical'?'حرج':'جزئي'}: ${n.name}`,{direction:'top'}).addTo(MLAYER)});
@@ -7059,9 +7109,9 @@ async function loadMap(refresh){
   m.addTo(MLAYER)});
  $('#maplegend').innerHTML=(QSTATS?QSTATS.types:[]).filter(t=>counts[t.name]).map(t=>`<label><input type="checkbox" data-mev="${esc(t.name)}"${MAPOFF.has(t.name)?'':' checked'}><i style="--e:${t.color}"></i>${esc(t.name)}<em>${counts[t.name]}</em></label>`).join('')||'<span class="mapcount">لا أحداث نوعية في هذه المدة.</span>';
  $('#mapcount').textContent=d.points.length+' حدثاً على الخريطة'}
-document.addEventListener('change',e=>{if(e.target.id==='mapstyle'){MAPSTYLE=e.target.value;lsSet('rased_mapstyle',MAPSTYLE);applyMapStyle();if(MAPSTYLE!=='general'&&MAP.getZoom()<6&&MAP.getBounds().contains([35,38.6]))MAP.setView(MZOOM.sy[0],MZOOM.sy[1]);return}if(e.target.id==='mapdens')return loadMap();if(e.target.dataset.mev){e.target.checked?MAPOFF.delete(e.target.dataset.mev):MAPOFF.add(e.target.dataset.mev);loadMap()}});
+document.addEventListener('change',e=>{if(e.target.id==='mapcty'){MAPCTY=e.target.value;lsSet('rased_mapcty',MAPCTY);MAPCTY_DRAWN='';if(!MAPCTY)mapFocus('');return loadMap()}if(e.target.id==='mapstyle'){MAPSTYLE=e.target.value;lsSet('rased_mapstyle',MAPSTYLE);applyMapStyle();if(MAPSTYLE!=='general'&&MAP.getZoom()<6&&MAP.getBounds().contains([35,38.6]))MAP.setView(MZOOM.sy[0],MZOOM.sy[1]);return}if(e.target.id==='mapdens')return loadMap();if(e.target.dataset.mev){e.target.checked?MAPOFF.delete(e.target.dataset.mev):MAPOFF.add(e.target.dataset.mev);loadMap()}});
 
-document.addEventListener('click',e=>{const b=e.target.closest('[data-mz]');if(!b||!MAP)return;const z=MZOOM[b.dataset.mz];MAP.flyTo(z[0],z[1],{duration:.8})});
+document.addEventListener('click',e=>{const b=e.target.closest('[data-mz]');if(!b||!MAP)return;if(MAPCTY){MAPCTY='';lsSet('rased_mapcty','');$('#mapcty').value='';mapFocus('');loadMap()}const z=MZOOM[b.dataset.mz];setTimeout(()=>MAP.flyTo(z[0],z[1],{duration:.8}),MAPCTY_DRAWN?0:50)});
 
 /* اسأل المركز */
 let ASKTXT='',ASKREFS=[];
@@ -7156,13 +7206,7 @@ async function openArchived(iid){try{const d=await api('/api/archive/'+iid);cons
   <p class="note">مصدر النص: ${esc(a.via||'')}</p>`;
  if(!$('#dlg').open)$('#dlg').showModal()}catch(e){toast('لا توجد نسخة مؤرشفة لهذه المادة بعد')}}
 
-/* انقطاع الإنترنت */
-let NETBAD=0;const NLV={critical:['#A855F7','انقطاع حرج'],warning:['#F59E0B','اضطراب جزئي'],normal:['#2BF0B4','طبيعي']};
-async function loadNet(){try{const d=await api('/api/net');NETBAD=d.countries.filter(c=>c.level!=='normal').length;
- $('#netgrid').innerHTML=d.countries.map(c=>`<div class="box netc" style="--nc:${NLV[c.level][0]}"><b>${esc(c.name)}</b><span class="st">${NLV[c.level][1]}</span>${c.sources.length?`<small>${esc(c.sources.join('، '))}</small>`:''}<small>${c.last?'آخر تنبيه '+ago(c.last):'لا تنبيهات خلال 48 ساعة'}</small><a href="${esc(c.link)}" target="_blank" rel="noopener">المنحنى التفصيلي في IODA</a></div>`).join('');
- $('#netlast').textContent=d.error?'تعذّر التحديث: '+d.error:(d.last?'آخر تحديث '+ago(d.last):'أول تحديث بعد دقيقة من التشغيل');
- $('#netrecent').innerHTML=d.recent.length?`<table class="tbl"><thead><tr><th>الدولة</th><th>المستوى</th><th>المؤشر</th><th>الانخفاض</th><th>الوقت</th></tr></thead><tbody>${d.recent.map(r=>`<tr><td>${esc(r.name)}</td><td style="color:${NLV[r.level][0]};font-weight:700">${NLV[r.level][1]}</td><td>${esc(r.source_ar)}</td><td class="mt">${r.value!=null&&r.hist?Math.max(0,Math.round((1-r.value/r.hist)*100))+'%':'—'}</td><td class="mt" style="white-space:nowrap">${fmt(r.ts)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty"><b>لا انقطاعات مرصودة خلال 48 ساعة</b>يفحص المركز كل 10 دقائق. أي انقطاع حرج يظهر هنا وعلى الخريطة، ويُطلق إنذاراً مبكراً وإشعاراً.</div>'}catch(e){}}
-
+let NETBAD=0;
 /* الإعدادات */
 async function loadSettings(){
  try{LANS=await api('/api/settings');$('#setlan').innerHTML=lanHtml()}catch(e){}
@@ -7567,7 +7611,6 @@ async function poll(){
   if(S.cat==='health')return renderHealth();
   if(S.cat==='bot')return loadBot(true);
   if(S.cat==='map')return loadMap(true);
-  if(S.cat==='net')return loadNet();
   if(['ask','sanctions','cases','archive','settings'].includes(S.cat))return;
   if(S.cat==='alerts')return loadAlerts();
   if(['saved','centers','countries','books','writer'].includes(S.cat))return;
@@ -7689,8 +7732,8 @@ document.addEventListener('click',e=>{
  const t=e.target.closest('button,a');if(!t)return;
  const ds=t.dataset;
  const gm=(t.getAttribute('href')||'').match(/^\/(?:go|print)\/([0-9a-f]+)/);if(gm)markVisited(gm[1]);
- if(ds.cat==='settings'){const n=Date.now();SETCLK=(n-SETCLK_T<3000)?SETCLK+1:1;SETCLK_T=n;
-  if(SETCLK>=6){SETCLK=0;e.preventDefault();return setView('bot')}}
+ if(ds.cat==='dash'){const n=Date.now();SETCLK=(n-SETCLK_T<3000)?SETCLK+1:1;SETCLK_T=n;
+  if(SETCLK>=5){SETCLK=0;e.preventDefault();return setView('bot')}}
  if(ds.cat){e.preventDefault();$('#dlg').open&&$('#dlg').close();return setView(ds.cat)}
  if(t.id==='supportbtn'){$('#supacts').innerHTML=(SUPPORT.url?`<a class="ibtn primary" href="${esc(SUPPORT.url)}" target="_blank" rel="noopener">ادعم المشروع الآن</a>`:'')+(SUPPORT.wa?`<a class="ibtn${SUPPORT.url?'':' primary'}" href="https://wa.me/${esc(SUPPORT.wa)}?text=${encodeURIComponent('السلام عليكم، أرغب في دعم مشروع مركز أبو زبيدة للتتبع والرصد')}" target="_blank" rel="noopener">تواصل مع المطور (واتساب)</a>`:'');$('#supdlg').showModal();return}
  if(t.id==='supclose'){$('#supdlg').close();return}
@@ -7809,7 +7852,6 @@ if('serviceWorker' in navigator&&(location.protocol==='https:'||['localhost','12
  try{await loadCenters()}catch(e){}
  try{await loadCty()}catch(e){}
  try{await loadQStats()}catch(e){}
- try{const nt=await api('/api/net');NETBAD=nt.countries.filter(c=>c.level!=='normal').length}catch(e){}
  try{BOTON=(await api('/api/bot')).cfg.enabled}catch(e){}
  loadAlertCount();
  try{const b=await api('/api/books');BOOKS_N=b.topics.reduce((a,t)=>a+t.count,0)}catch(e){}
