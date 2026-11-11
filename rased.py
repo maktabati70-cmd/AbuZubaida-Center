@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from urllib.parse import quote, quote_plus, urlparse
 
-VERSION = "2026.11.11.3"
+VERSION = "2026.11.11.4"
 
 # التشغيل بلا نافذة سوداء (pythonw أو exe بلا وحدة تحكم): نوجّه المخرجات إلى «لا شيء» حتى لا تتعطل الطباعة
 if sys.stdout is None or sys.stderr is None:
@@ -473,7 +473,7 @@ COUNTRIES = [
     ("تركيا", "TR", ME, ["تركيا", "تركي", "الاتراك", "انقرة", "اسطنبول", "اردوغان"],
      ["turkey", "türkiye", "turkiye", "turkish", "ankara", "istanbul", "erdogan", "erdoğan"]),
     ("لبنان", "LB", ME, ["لبنان", "لبناني", "بيروت", "حزب الله"], ["lebanon", "lebanese", "beirut", "hezbollah"]),
-    ("الأردن", "JO", ME, ["الاردن", "اردني", "عمّان"], ["jordan", "amman"]),
+    ("الأردن", "JO", ME, ["الاردن", "اردني", "عمان الاردنية", "العاصمة الاردنية"], ["jordan", "amman"]),
     ("فلسطين", "PS", ME, ["فلسطين", "فلسطيني", "غزة", "الضفة الغربية", "رام الله", "جنين", "نابلس", "خان يونس", "رفح"],
      ["palestin", "gaza", "west bank", "ramallah", "jenin", "nablus", "khan younis", "rafah"]),
     ("إسرائيل", "IL", ME, ["اسرائيل", "اسرائيلي", "تل ابيب", "نتنياهو"], ["israel", "tel aviv", "netanyahu", "=idf"]),
@@ -483,7 +483,7 @@ COUNTRIES = [
     ("قطر", "QA", ME, ["قطر", "قطري", "الدوحة"], ["qatar", "doha"]),
     ("الكويت", "KW", ME, ["الكويت", "كويتي"], ["kuwait"]),
     ("البحرين", "BH", ME, ["البحرين", "بحريني", "المنامة"], ["bahrain", "manama"]),
-    ("عُمان", "OM", ME, ["سلطنة عمان", "العماني", "مسقط"], ["oman", "muscat"]),
+    ("عُمان", "OM", ME, ["سلطنة عمان", "العماني", "مسقط", "سواحل عمان", "خليج عمان", "بحر عمان", "قبالة عمان", "ساحل عمان"], ["oman", "muscat"]),
     ("اليمن", "YE", ME, ["اليمن", "يمني", "صنعاء", "عدن", "الحوثي", "الحوثيين", "الحديدة", "مأرب", "تعز", "المكلا", "حضرموت"],
      ["yemen", "sanaa", "sana'a", "=aden", "houthi", "hodeidah", "marib", "taiz", "hadramout"]),
     ("ليبيا", "LY", AF, ["ليبيا", "ليبي", "طرابلس الليبية", "بنغازي", "حفتر"], ["libya", "tripoli", "benghazi", "haftar"]),
@@ -594,8 +594,9 @@ EVENT_TYPES = [
      ["assassinat", "targeted killing", "killed a senior", "killed the leader", "killed top"]),
     ("اعتقال شخصية مهمة", "#A855F7", [], []),          # يُستنتج: اعتقال + صفة قيادية
     ("توغل إسرائيلي", "#2563EB", [], []),               # يُستنتج: توغل/اقتحام + إسرائيل
+    ("هجوم بحري", "#0891B2", [], []),                   # يُستنتج: سفينة/ناقلة + هجوم
     ("ضربة مسيّرة", "#F97316", ["طائرة مسيرة", "طائرات مسيرة", "بطائرة مسيرة", "مسيرة انتحارية", "مسيرات انتحارية", "هجوم بالمسيرات",
-                                 "ضربة بمسيرة", "استهدفت مسيرة", "درون", "مسيرة اسرائيلية", "مسيرة تركية", "مسيرة روسية", "مسيرة اوكرانية"],
+                                 "ضربة بمسيرة", "استهدفت مسيرة", "مسيرة تستهدف", "مسيرة استهدفت", "بمسيرة", "بمسيرات", "درون", "مسيرة اسرائيلية", "مسيرة تركية", "مسيرة روسية", "مسيرة اوكرانية"],
      ["drone strike", "drone attack", "kamikaze drone", "uav strike", "drone hit", "drones hit", "drone swarm", "shahed"]),
     ("غارة جوية", "#EF4444", ["غارة", "غارات", "قصف جوي", "ضربة جوية", "ضربات جوية", "الطيران الحربي", "طائرات حربية", "قصف اسرائيلي", "قصف روسي"],
      ["airstrike", "air strike", "air raid", "warplanes", "bombarded", "bombing raid", "struck by israeli", "israeli strike", "russian strike"]),
@@ -648,10 +649,38 @@ def _hit(pair, ar_t, en_t):
     return bool((a and a.search(ar_t)) or (b and b.search(en_t)))
 
 
+def _near(p1, p2, ar_t, en_t, dist=45):
+    """هل تقع كلمتان من مجموعتين متقاربتين في النص (مثل: اعتقال + قيادي)؟"""
+    for i, t in ((0, ar_t), (1, en_t)):
+        r1, r2 = p1[i], p2[i]
+        if not (r1 and r2):
+            continue
+        s1 = [m.start() for m in r1.finditer(t)]
+        s2 = [m.start() for m in r2.finditer(t)]
+        if any(abs(x_ - y_) <= dist for x_ in s1 for y_ in s2):
+            return True
+    return False
+
+
+_SEA_RES = (_ar_re(["ناقلة", "ناقلات", "سفينة", "سفن", "السفينة", "مركب", "زورق", "حاملة"]),
+            _en_re(["tanker", "vessel", "ship", "cargo ship", "freighter", "boat"]))
+_SEA_HIT = (_ar_re(["هوجمت", "هجوم", "استهداف", "استهدفت", "استهدف", "مقذوف", "اصيبت", "اصابة", "قصف", "انفجار", "احتجاز", "اختطاف", "قرصنة"]),
+            _en_re(["attack", "struck", "hit by", "projectile", "explosion", "seized", "hijack", "targeted"]))
+_SEA_ONLY = (_ar_re(["هيئة عمليات التجارة البحرية", "عمليات التجارة البحرية البريطانية", "هيئة بحرية بريطانية"]), _en_re(["ukmto"]))
+
+
 def events_for(cat, title, title_ar=None, summary=None, summary_ar=None):
-    if cat in STUDY_EV_CATS:
-        return compute_events(cat, title, title_ar)
-    return compute_events(cat, title, title_ar, (summary or "")[:300], (summary_ar or "")[:300])
+    """الحدث يُستخرج من العنوان. الملخص يُستعمل فقط لتدقيق نوع الحدث إن كان العنوان نفسه يدل على حدث ميداني،
+    حتى لا تُصنَّف قصة رياضية أو إنسانية «غارة» لأن ملخصها ذكر الحرب."""
+    t = compute_events(cat, title, title_ar)
+    if cat in STUDY_EV_CATS or not t:
+        return t
+    full = compute_events(cat, title, title_ar, (summary or "")[:300], (summary_ar or "")[:300])
+    a = [e for e in t.strip("|").split("|") if e]
+    b = [e for e in full.strip("|").split("|") if e and e not in a
+         and not (e == "اعتقال شخصية مهمة" and "اعتقال" in a) and not (e == "توغل إسرائيلي" and "توغل عسكري" in a)]
+    out = (a + b)[:3]
+    return "|" + "|".join(out) + "|"
 
 
 def compute_events(cat, *texts):
@@ -661,7 +690,9 @@ def compute_events(cat, *texts):
     raw = " ".join(t for t in texts if t)
     ar_t, en_t = norm_ar(raw), raw.lower()
     found = [n for n, a, b in EVENT_RES if (a or b) and _hit((a, b), ar_t, en_t)]
-    if "اعتقال" in found and _hit(VIP_RES, ar_t, en_t):
+    if _hit(_SEA_ONLY, ar_t, en_t) or _near(_SEA_RES, _SEA_HIT, ar_t, en_t, 40):
+        found = ["هجوم بحري"] + [f for f in found if f not in ("غارة جوية", "انفجار")]
+    if "اعتقال" in found and _near(_EVR["اعتقال"], VIP_RES, ar_t, en_t):
         found[found.index("اعتقال")] = "اعتقال شخصية مهمة"
     if "توغل عسكري" in found and _hit(ISR_RES, ar_t, en_t):
         found[found.index("توغل عسكري")] = "توغل إسرائيلي"
@@ -2051,6 +2082,12 @@ def countries_backfill():
     if not kv_get("events_v2"):       # إعادة تصنيف المقالات والدراسات بعد إضافتها للأخبار النوعية
         x("UPDATE items SET events=NULL WHERE cat IN ('think_global','think_arab')")
         kv_set("events_v2", 1)
+    if not kv_get("countries_v2"):    # إعادة ربط الدول بعد التفريق بين عُمان وعمّان
+        x("UPDATE items SET countries=NULL WHERE published >= ? AND translated=1", (now() - 31 * 86400,))
+        kv_set("countries_v2", 1)
+    if not kv_get("events_v3"):       # تصنيف أدق: الحدث من العنوان، والهجوم البحري، واعتقال القيادي بشرط التقارب
+        x("UPDATE items SET events=NULL WHERE published >= ? AND translated=1", (now() - 31 * 86400,))
+        kv_set("events_v3", 1)
     while True:
         rows = q("SELECT id, title, summary, title_ar, summary_ar FROM items WHERE countries IS NULL LIMIT 2000")
         if not rows:
@@ -3951,18 +3988,110 @@ CITY_RES = [(re.compile(r"(?<![\u0600-\u06FF])(?:[وفبلك])?(?:ال)?" + re.e
              re.compile(r"\b" + re.escape(e) + r"\b"), lat, lon, a) for a, e, lat, lon in CITIES]
 
 
-def locate(r):
-    text_ar = norm_ar(" ".join(filter(None, [r["title_ar"], (r["summary_ar"] or "")[:300]])))
-    text_en = " ".join(filter(None, [r["title"], (r["summary"] or "")[:300]])).lower()
+_CITY_GROUPS = {
+    ("سوريا",): "دمشق حلب ادلب حمص حماة اللاذقية طرطوس|دير الزور|الرقة الحسكة القامشلي درعا السويداء القنيطرة منبج البوكمال تدمر عفرين|الباب|جرابلس|عين العرب|تل ابيض|راس العين",
+    ("العراق",): "بغداد الموصل البصرة اربيل كركوك الرمادي الفلوجة تكريت السليمانية سنجار",
+    ("لبنان",): "بيروت صيدا صور النبطية بعلبك",
+    ("فلسطين", "إسرائيل"): "غزة|خان يونس|رفح|دير البلح|جباليا جنين نابلس|رام الله|طولكرم الخليل القدس",
+    ("إسرائيل", "فلسطين"): "تل ابيب|حيفا ايلات",
+    ("اليمن",): "صنعاء عدن الحديدة مارب تعز المكلا",
+    ("إيران",): "طهران اصفهان تبريز شيراز|بندر عباس",
+    ("تركيا",): "انقرة اسطنبول|غازي عنتاب|انطاكيا كلس اورفا",
+    ("السودان",): "الخرطوم|ام درمان|الفاشر نيالا بورتسودان الابيض",
+    ("ليبيا",): "طرابلس الليبية|بنغازي مصراتة سرت",
+    ("مصر",): "القاهرة العريش", ("السعودية",): "الرياض", ("الصومال",): "مقديشو", ("مالي",): "باماكو",
+    ("النيجر",): "نيامي", ("بوركينا فاسو",): "واغادوغو", ("نيجيريا",): "مايدوغوري",
+    ("أوكرانيا",): "كييف خاركيف اوديسا دونيتسك زابوريجيا خيرسون لفيف", ("روسيا",): "موسكو كورسك بيلغورود",
+    ("أفغانستان",): "كابل", ("باكستان",): "اسلام اباد|كويتا بيشاور",
+}
+CITY_CTRY = {}
+for _cs, _names in _CITY_GROUPS.items():
+    for _chunk in _names.split("|"):
+        for _n in ([_chunk] if " " in _chunk and _chunk in {c[0] for c in CITIES} else _chunk.split()):
+            CITY_CTRY.setdefault(_n, _cs)
+for _a, *_ in CITIES:                     # الأسماء المركبة (دير الزور، خان يونس...) تُضاف كاملة
+    if _a not in CITY_CTRY:
+        for _cs, _names in _CITY_GROUPS.items():
+            if _a in _names.replace("|", " | "):
+                CITY_CTRY[_a] = _cs
+                break
+# أسماء مدن هي أيضاً كلمات عادية (صور = صُوَر، الباب = باب، تدمر = تُدمّر، الأبيض = لون...): تُقبل فقط بسياق واضح
+CITY_AMBIG = {"تدمر", "صور", "الباب", "سرت", "كلس", "الابيض", "جنين", "مارب", "الرمادي"}
+CITY_EN_AMBIG = {"tyre"}
+_CITY_CTX = re.compile(r"(?:مدين[ةه]|بلد[ةه]|ريف|محافظ[ةه]|قضاء|منطق[ةه]|مخيم|ميناء|قرب|محيط|شرق|غرب|شمال|جنوب|شرقي|غربي|شمالي|جنوبي)\s*$")
+
+
+def _find_city(text_ar, text_en, ctry_set):
+    best = None
     for ar_re, en_re, lat, lon, name in CITY_RES:
-        if ar_re.search(text_ar) or en_re.search(text_en):
-            return lat, lon, name, True
-    ctry = [c for c in (r["countries"] or "").strip("|").split("|") if c]
-    if ctry and ctry[0] in CENTROIDS:
-        h = int(hashlib.md5(r["id"].encode()).hexdigest()[:6], 16)
-        lat, lon = CENTROIDS[ctry[0]]
-        return lat + ((h % 100) - 50) / 60, lon + (((h // 100) % 100) - 50) / 60, ctry[0], False
-    return None
+        m = ar_re.search(text_ar) if text_ar else None
+        me = en_re.search(text_en) if text_en else None
+        if me and name in CITY_AMBIG and me.group(0) in CITY_EN_AMBIG:
+            me = None
+        if not (m or me):
+            continue
+        allowed = CITY_CTRY.get(name, ())
+        if ctry_set and allowed and not (set(allowed) & ctry_set):
+            continue                       # المدينة في دولة لم يذكرها الخبر: غالباً تشابه أسماء
+        if name in CITY_AMBIG:
+            ok_ctx = m and _CITY_CTX.search(text_ar[max(0, m.start() - 14):m.start()])
+            if not ((ok_ctx or me) and allowed and set(allowed) & ctry_set):
+                continue
+        pos = m.start() if m else 5000 + me.start()
+        if best is None or pos < best[0]:
+            best = (pos, lat, lon, name)
+    return best
+
+
+_LOC_CUE = re.compile(r"(?:في|فى|قبالة|سواحل|ساحل|شمال|جنوب|شرق|غرب|شمالي|جنوبي|شرقي|غربي|داخل|على|الى|من)\s*$")
+
+
+def _title_countries(t_ar, t_en):
+    """دول العنوان مرتبة: ما سبقه حرف أو كلمة مكان («في»، «قبالة سواحل»...) أولاً، لأن «هيئة بريطانية» ليست مكان الحدث."""
+    ar = norm_ar(t_ar or "")
+    en = (t_en or "").lower()
+    cued, plain = [], []
+    for name, ar_re, en_re in COUNTRY_RES:
+        best = None
+        for m in ar_re.finditer(ar):
+            if m.group(0).endswith(AR_FALSE):
+                continue
+            cue = bool(_LOC_CUE.search(ar[max(0, m.start() - 12):m.start()]))
+            best = (not cue, m.start()) if best is None else min(best, (not cue, m.start()))
+        me = en_re.search(en)
+        if me and best is None:
+            cue = bool(re.search(r"\b(?:in|off|near|across|inside)\s+(?:the\s+)?$", en[max(0, me.start() - 14):me.start()]))
+            best = (not cue, 5000 + me.start())
+        if best:
+            (plain if best[0] else cued).append((best[1], name))
+    return [n for _, n in sorted(cued)] + [n for _, n in sorted(plain)]
+
+
+def locate(r):
+    """موقع الخبر على الخريطة: مدينة من العنوان، ثم من الملخص، ثم الدولة المذكورة في العنوان.
+    الخبر الذي لا يُعرف مكانه بثقة لا يوضع على الخريطة بدل وضعه في مكان خاطئ."""
+    ctry_all = [c for c in (r["countries"] or "").strip("|").split("|") if c]
+    t_ar, t_en = norm_ar(r["title_ar"] or ""), (r["title"] or "").lower()
+    ctry_title = _title_countries(r["title_ar"], r["title"])
+    cset = set(ctry_all) | set(ctry_title)
+    hit = _find_city(t_ar, t_en, cset)
+    if not hit and (r["kind"] or "") not in ("video",):       # ملخصات يوتيوب فيها نصوص ترويجية: نكتفي بالعنوان
+        s_ar = norm_ar((r["summary_ar"] or "")[:300])
+        s_en = (r["summary"] or "")[:300].lower()
+        hit = _find_city(s_ar, s_en, cset)
+    if hit:
+        return hit[1], hit[2], hit[3], True
+    if ctry_title:
+        c0 = ctry_title[0]
+    elif len(ctry_all) == 1:
+        c0 = ctry_all[0]
+    else:
+        return None
+    if c0 not in CENTROIDS:
+        return None
+    h = int(hashlib.md5(r["id"].encode()).hexdigest()[:6], 16)
+    lat, lon = CENTROIDS[c0]
+    return lat + ((h % 100) - 50) / 60, lon + (((h // 100) % 100) - 50) / 60, c0, False
 
 
 # ───────────────────────── رصد انقطاع الإنترنت (IODA - معهد جورجيا للتقنية، مجاني بلا مفتاح) ─────────────────────────
@@ -6231,6 +6360,7 @@ button.tag:hover{color:var(--text);border-color:var(--border2)}
 @media (max-width:1100px){.wgrid{grid-template-columns:1fr}.wform{position:static}}
 
 /* الأخبار النوعية */
+.ev+.ev{margin-inline-start:4px}
 .ev{display:inline-flex;align-items:center;gap:5px;font:700 11px var(--fd);padding:0 8px;border-radius:3px;line-height:2;color:#fff;background:var(--e)}
 .ev::before{content:"";width:5px;height:5px;border-radius:50%;background:#fff;opacity:.85}
 .qualbox{margin-bottom:18px;border-top:3px solid var(--red);position:relative;overflow:hidden}
@@ -6753,7 +6883,7 @@ function vfHtml(it){if(!it.cluster||!VCATS.includes(it.cat))return'';const n=it.
  if(n>=3)return `<button class="vf v3" data-cluster="${esc(it.cluster)}" title="نقلته ${n} مصادر مستقلة">✓ مؤكد، ${n} مصادر</button>`;
  if(n===2)return `<button class="vf v2" data-cluster="${esc(it.cluster)}" title="نقله مصدران">مصدران</button>`;
  return (it.events?`<span class="vf v1" title="لم ينقله حتى الآن إلا مصدر واحد">مصدر واحد، غير مؤكد</span>`:'')}
-function evHtml(e){return (e||'').split('|').filter(Boolean).map(n=>`<span class="ev" style="--e:${EVC[n]||'var(--red)'}">${esc(n)}</span>`).join('')}
+function evHtml(e){return (e||'').split('|').filter(Boolean).map(n=>`<span class="ev" style="--e:${EVC[n]||'var(--red)'}">${esc(n)}</span>`).join(' ')}
 function ctyHtml(c,max=6){return (c||'').split('|').filter(Boolean).slice(0,max).map(n=>`<button class="tag cty" data-country="${esc(n)}" title="كل ما يخص ${esc(n)}">${esc(n)}</button>`).join('')}
 function state(it){if(it.translated===1)return'';if(it.translated<=-3)return'<span class="badge fail">تعذّرت الترجمة</span>';return'<span class="badge pend">قيد الترجمة</span>'}
 function mlHtml(it){const m=META?.media||{};const l=m[(it.source_ar||'').toLowerCase()]||m[(it.source||'').replace('t.me/','').toLowerCase()];
