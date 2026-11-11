@@ -44,13 +44,15 @@ from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from urllib.parse import quote, quote_plus, urlparse
 
-VERSION = "2026.11.08"
+VERSION = "2026.11.11.2"
 
 # التشغيل بلا نافذة سوداء (pythonw أو exe بلا وحدة تحكم): نوجّه المخرجات إلى «لا شيء» حتى لا تتعطل الطباعة
 if sys.stdout is None or sys.stderr is None:
     _null = open(os.devnull, "w", encoding="utf-8")
     sys.stdout = sys.stdout or _null
     sys.stderr = sys.stderr or _null
+SUPPORT_URL = ""                 # رابط الدعم/التبرع (اختياري). إن تُرك فارغاً يظهر زر التواصل مع المطور فقط
+DEV_WHATSAPP = "963968744241"    # رقم واتساب المطور لزر «ادعم المشروع»
 DEFAULT_REPO = "maktabati70-cmd/AbuZubaida-Center"     # مستودع GitHub الذي تُسحب منه التحديثات
 
 # نسخة exe: إن وُجد rased.py محدَّث بجانب الملف التنفيذي (نزّله التحديث التلقائي) يُشغَّل بدل النسخة المدمجة
@@ -745,6 +747,9 @@ def init_db():
     CREATE TABLE IF NOT EXISTS tcache(h TEXT PRIMARY KEY, ar TEXT);
     CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
     CREATE TABLE IF NOT EXISTS tg_sent(id TEXT PRIMARY KEY, sent INTEGER, title TEXT);
+    CREATE TABLE IF NOT EXISTS tg_sent2(ch TEXT, id TEXT, sent INTEGER, title TEXT, PRIMARY KEY(ch, id));
+    CREATE INDEX IF NOT EXISTS ix_tg2_sent ON tg_sent2(sent DESC);
+    CREATE TABLE IF NOT EXISTS daily_reports(day TEXT PRIMARY KEY, created INTEGER, html TEXT, tg TEXT, n INTEGER, ai INTEGER);
     CREATE TABLE IF NOT EXISTS books(
         id TEXT PRIMARY KEY, topic TEXT, title TEXT, title_ar TEXT, authors TEXT, publisher TEXT,
         published TEXT, year INTEGER, description TEXT, description_ar TEXT, image TEXT, link TEXT,
@@ -1839,7 +1844,8 @@ def cat_meta():
 
 @app.get("/")
 def index():
-    return Response(PAGE, mimetype="text/html; charset=utf-8")
+    page = PAGE.replace("__SUPPORT_URL__", json.dumps(SUPPORT_URL)).replace("__DEV_WA__", json.dumps(DEV_WHATSAPP))
+    return Response(page, mimetype="text/html; charset=utf-8")
 
 
 def threat_index():
@@ -2814,8 +2820,23 @@ def api_articles_del(aid):
 # ───────────────────────── بوت تيليغرام: نشر ملخصات المقالات المترجمة آلياً ─────────────────────────
 BOT_DEFAULT_CATS = ["world", "think_global", "think_arab"]      # الأخبار العالمية + المقالات والدراسات
 BOT_ALLOWED_CATS = ["world", "think_global", "think_arab", "terror", "intel"]
-BOT = {"last_sent": 0, "next_due": 0, "last_error": "", "last_instant": 0, "bot_name": "", "running": False}
+BOT = {"last_sent": 0, "next_due": 0, "last_error": "", "last_instant": 0, "bot_name": "", "running": False,
+       "next": {}, "errors": {}, "cmd_error": "", "cmd_last": 0, "requests": []}
 BOT_LOCK = threading.Lock()
+BOT_CHATS = {}                    # المحادثات التي راسلت البوت (للاكتشاف التلقائي)
+CH_DEFAULTS = {"name": "قناة", "chat": "", "on": True, "cats": BOT_DEFAULT_CATS, "interval": 60, "max_day": 0,
+               "hours_from": 0, "hours_to": 24, "inc": [], "exc": [], "scope": "title", "fresh_h": 168,
+               "preview": True, "photo": False}
+
+
+def _ch_norm(ch):
+    for k, v in CH_DEFAULTS.items():
+        if k not in ch:
+            ch[k] = list(v) if isinstance(v, list) else v
+    ch["id"] = str(ch.get("id") or hashlib.sha1(f"{time.time()}{ch.get('chat')}".encode()).hexdigest()[:8])
+    ch["cats"] = [k for k in ch["cats"] if k in BOT_ALLOWED_CATS] or list(BOT_DEFAULT_CATS)
+    ch["prio_qual"] = False
+    return ch
 
 
 def bot_cfg():
@@ -2823,20 +2844,44 @@ def bot_cfg():
         c = json.loads(kv_get("bot_cfg") or "{}")
     except Exception:
         c = {}
-    c.setdefault("token", ""); c.setdefault("chat", ""); c.setdefault("interval", 60)
-    c.setdefault("cats", BOT_DEFAULT_CATS); c.setdefault("enabled", False)
-    c.setdefault("preview", True)
+    c.setdefault("token", ""); c.setdefault("enabled", False)
+    c.setdefault("cmd_on", False); c.setdefault("cmd_mode", "allow"); c.setdefault("cmd_users", [])
     if not c.get("v2"):          # سياسة جديدة: لا أخبار نوعية ولا إنذارات على تيليغرام
         c["cats"] = BOT_DEFAULT_CATS
         c["v2"] = True
-    c["cats"] = [k for k in c["cats"] if k in BOT_ALLOWED_CATS] or BOT_DEFAULT_CATS
+    if not isinstance(c.get("channels"), list) or not c["channels"]:
+        # الترحيل من الإعداد القديم (قناة واحدة) إلى قنوات متعددة
+        main = {"id": "main", "name": "القناة الرئيسية"}
+        for k in CH_DEFAULTS:
+            if k in c and k not in ("name", "on"):
+                main[k] = c[k]
+        c["channels"] = [main]
+        try:
+            x("INSERT OR IGNORE INTO tg_sent2(ch, id, sent, title) SELECT 'main', id, sent, title FROM tg_sent")
+        except Exception:
+            pass
+    c["channels"] = [_ch_norm(ch) for ch in c["channels"]]
+    c["chat"] = next((ch["chat"] for ch in c["channels"] if ch["chat"]), "")
     c["instant_qual"] = c["prio_qual"] = c["send_alerts"] = False
     return c
 
 
-def tg_api(token, method, **params):
+def bot_save(c):
+    c = {k: v for k, v in c.items() if k not in ("chat", "instant_qual", "prio_qual", "send_alerts")}
+    kv_set("bot_cfg", json.dumps(c, ensure_ascii=False))
+
+
+def bot_channel(cfg, ch_id):
+    return next((ch for ch in cfg["channels"] if ch["id"] == ch_id), None)
+
+
+def tg_api(token, method, _files=None, _timeout=25, **params):
     for _ in range(3):
-        r = requests.post(f"https://api.telegram.org/bot{token}/{method}", json=params, timeout=25)
+        if _files:
+            data = {k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list, bool)) else v) for k, v in params.items()}
+            r = requests.post(f"https://api.telegram.org/bot{token}/{method}", data=data, files=_files, timeout=_timeout + 30)
+        else:
+            r = requests.post(f"https://api.telegram.org/bot{token}/{method}", json=params, timeout=_timeout)
         d = r.json()
         if d.get("ok"):
             return d["result"]
@@ -2845,6 +2890,21 @@ def tg_api(token, method, **params):
             continue
         raise ValueError(d.get("description") or f"رمز {r.status_code}")
     raise ValueError("تيليغرام يطلب الانتظار (حد الرسائل)")
+
+
+def tg_send_long(token, chat, text, **kw):
+    """يقسم النص الطويل على عدة رسائل (حد تيليغرام 4096 حرفاً) عند حدود الأسطر."""
+    parts, cur = [], ""
+    for line in text.split("\n"):
+        if len(cur) + len(line) + 1 > 3900 and cur:
+            parts.append(cur)
+            cur = ""
+        cur += line + "\n"
+    if cur.strip():
+        parts.append(cur)
+    for p_ in parts:
+        tg_api(token, "sendMessage", chat_id=chat, text=p_, parse_mode="HTML",
+               link_preview_options={"is_disabled": True}, **kw)
 
 
 def bot_summary(row):
@@ -2869,73 +2929,222 @@ def bot_summary(row):
     return s_
 
 
-def bot_message(row, summary, link):
+def bot_message(row, summary, link, limit=4000):
     e = html.escape
     cat = dict((k, n) for k, n, _ in CATEGORIES).get(row["cat"], "")
     evs = [x for x in (row["events"] or "").strip("|").split("|") if x]
     ctry = [x for x in (row["countries"] or "").strip("|").split("|") if x][:4]
     when = datetime.fromtimestamp(row["published"]).strftime("%Y-%m-%d %H:%M")
-    lines = []
-    if evs:
-        lines.append("🔴 <b>خبر نوعي: " + e("، ".join(evs)) + "</b>")
-    lines.append(f"<b>{e(row['title_ar'] or row['title'])}</b>")
-    if summary:
-        lines += ["", e(summary)]
-    lines += ["", f"🏛 {e(row['source_ar'])}  |  🗂 {e(cat)}"]
-    if ctry:
-        lines.append("📍 " + e("، ".join(ctry)))
-    lines.append(f"🕒 {when}")
-    if link:
-        lines += ["", f'🔗 <a href="{e(link, quote=True)}">قراءة المقال في موقعه</a>']
-    lines += ["", "<i>مركز أبو زبيدة للتتبع والرصد</i>"]
-    return "\n".join(lines)[:4000]
+
+    def build(summ):
+        lines = []
+        if evs:
+            lines.append("🔴 <b>خبر نوعي: " + e("، ".join(evs)) + "</b>")
+        lines.append(f"<b>{e(row['title_ar'] or row['title'])}</b>")
+        if summ:
+            lines += ["", e(summ)]
+        lines += ["", f"🏛 {e(row['source_ar'])}  |  🗂 {e(cat)}"]
+        if ctry:
+            lines.append("📍 " + e("، ".join(ctry)))
+        lines.append(f"🕒 {when}")
+        if link:
+            lines += ["", f'🔗 <a href="{e(link, quote=True)}">قراءة المقال في موقعه</a>']
+        lines += ["", "<i>مركز أبو زبيدة للتتبع والرصد</i>"]
+        return "\n".join(lines)
+
+    txt = build(summary)
+    s_ = summary or ""
+    while len(txt) > limit and s_:              # تقصير الملخص حتى يتسع (مهم لتعليق الصورة: 1024 حرفاً)
+        s_ = s_[:max(0, len(s_) - max(60, len(txt) - limit))].rstrip()
+        k = max(s_.rfind("."), s_.rfind("؟"), s_.rfind("،"))
+        s_ = (s_[:k + 1] if k > 80 else s_) + "…" if s_ else ""
+        txt = build(s_ if len(s_) > 3 else "")
+    return txt[:limit]
 
 
-def bot_pick(cfg, qual_only=False, fresh_minutes=None):
-    cats = [c for c in cfg["cats"] if c in dict((k, 1) for k, _, _ in CATEGORIES)] or BOT_DEFAULT_CATS
+# ── صورة المقال ──
+_IMG_CACHE = {}
+
+
+def item_image(row, link):
+    """يستخرج صورة المقال (og:image) من صفحته، ويخزّنها في الذاكرة."""
+    iid = row["id"]
+    if iid in _IMG_CACHE:
+        return _IMG_CACHE[iid]
+    img = ""
+    if link and link.startswith("http"):
+        try:
+            if cffi_requests is not None:
+                r = cffi_requests.get(link, impersonate="chrome", timeout=15)
+            else:
+                r = requests.get(link, headers=BROWSER_HEADERS, timeout=15)
+            t = r.text[:400000]
+            for pat in (r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)',
+                        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image',
+                        r'<meta[^>]+name=["\']twitter:image(?::src)?["\'][^>]+content=["\']([^"\']+)',
+                        r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)'):
+                m = re.search(pat, t, re.I)
+                if m:
+                    from urllib.parse import urljoin
+                    img = urljoin(link, html.unescape(m.group(1)).strip())
+                    break
+        except Exception:
+            img = ""
+    if img and re.search(r"(logo|favicon|placeholder|default)[^/]*\.(png|svg|ico)", img, re.I):
+        img = ""
+    if len(_IMG_CACHE) > 500:
+        _IMG_CACHE.clear()
+    _IMG_CACHE[iid] = img
+    return img
+
+
+def _norm_bot(t):
+    t = norm_ar(t or "").lower().replace("ة", "ه")
+    return re.sub(r"\s+", " ", t)
+
+
+_bot_norm = _norm_bot
+
+
+def _bot_terms(lst):
+    """كل سطر شرط: الكلمات المفصولة بـ + يجب أن تجتمع كلها (مثل: سوريا + انتخابات)."""
+    out = []
+    for line in lst or []:
+        parts = [_norm_bot(x).strip() for x in str(line).split("+")]
+        # سوريا/سورية، تركيا/تركية، روسيا/روسية: تُطابق كلها
+        parts = [re.sub(r"(?<=\w{2})ي[اه](?=\s|$)", "ي", x) for x in parts if x]
+        if parts:
+            out.append(parts)
+    return out
+
+
+def bot_match(row, cfg):
+    inc, exc = _bot_terms(cfg.get("inc")), _bot_terms(cfg.get("exc"))
+    if not inc and not exc:
+        return True
+    txt = " ".join(filter(None, [row["title_ar"], row["title"]]))
+    if cfg.get("scope") == "all":
+        txt += " " + " ".join(filter(None, [row["summary_ar"], row["summary"], row["source_ar"]]))
+    txt = _norm_bot(txt)
+    if any(all(w in txt for w in g) for g in exc):
+        return False
+    return not inc or any(all(w in txt for w in g) for g in inc)
+
+
+def _bot_candidates(ch, limit=400, unsent=True):
+    cats = [c for c in ch["cats"] if c in dict((k, 1) for k, _, _ in CATEGORIES)] or BOT_DEFAULT_CATS
     ph = ",".join("?" * len(cats))
     where = [f"cat IN ({ph})", "translated=1", "kind NOT IN ('tweet', 'video')", "published >= ?",
-             "(events = '' OR events IS NULL)", "id NOT IN (SELECT id FROM tg_sent)"]
-    args = cats + [now() - (fresh_minutes * 60 if fresh_minutes else 7 * 86400)]
-    if qual_only:
-        where.append("events != '' AND events IS NOT NULL")
-    order = "(events != '' AND events IS NOT NULL) DESC, published DESC" if cfg["prio_qual"] else "published DESC"
-    return q(f"SELECT * FROM items WHERE {' AND '.join(where)} ORDER BY {order} LIMIT 1", args, one=True)
+             "(events = '' OR events IS NULL)"]
+    args = cats + [now() - max(1, int(ch.get("fresh_h") or 168)) * 3600]
+    if unsent:
+        where.append("id NOT IN (SELECT id FROM tg_sent2 WHERE ch=?)")
+        args.append(ch["id"])
+    return q(f"SELECT * FROM items WHERE {' AND '.join(where)} ORDER BY published DESC LIMIT {int(limit)}", args)
 
 
-def bot_send(row, cfg, mark=True):
+def bot_pick(ch):
+    for row in _bot_candidates(ch):
+        if bot_match(row, ch):
+            return row
+    return None
+
+
+def _day0():
+    return int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+
+
+def bot_sent_today(ch_id=None):
+    if ch_id:
+        return q("SELECT COUNT(*) c FROM tg_sent2 WHERE ch=? AND sent >= ?", (ch_id, _day0()), one=True)["c"]
+    return q("SELECT COUNT(*) c FROM tg_sent2 WHERE sent >= ?", (_day0(),), one=True)["c"]
+
+
+def bot_in_hours(ch):
+    a, b = int(ch.get("hours_from") or 0) % 24, int(ch.get("hours_to") if ch.get("hours_to") is not None else 24)
+    b = 24 if b in (0, 24) and a == 0 else b % 24
+    if a == 0 and b == 24:
+        return True
+    h = datetime.now().hour
+    return a <= h < b if a < b else (h >= a or h < b)
+
+
+def bot_hold_reason(ch):
+    if not bot_in_hours(ch):
+        return f"خارج ساعات النشر ({int(ch['hours_from']):02d}:00 – {int(ch['hours_to']) % 24:02d}:00)"
+    if int(ch.get("max_day") or 0) and bot_sent_today(ch["id"]) >= int(ch["max_day"]):
+        return f"بلغ الحد اليومي ({int(ch['max_day'])} رسالة)"
+    return ""
+
+
+def bot_send(row, cfg, ch, mark=True):
     link = resolve_item(row)
     row = q("SELECT * FROM items WHERE id=?", (row["id"],), one=True) or row
-    text = bot_message(row, bot_summary(row), link)
-    params = {"chat_id": cfg["chat"], "text": text, "parse_mode": "HTML",
-              "link_preview_options": {"is_disabled": not cfg["preview"], "url": link} if link else {"is_disabled": True}}
-    if link.startswith("http"):
-        params["reply_markup"] = {"inline_keyboard": [[{"text": "📖 اقرأ المقال", "url": link}]]}
-    tg_api(cfg["token"], "sendMessage", **params)
+    summ = bot_summary(row)
+    markup = {"inline_keyboard": [[{"text": "📖 اقرأ المقال", "url": link}]]} if link.startswith("http") else None
+    sent = False
+    if ch.get("photo"):
+        img = item_image(row, link)
+        if img:
+            cap = bot_message(row, summ, link, limit=1024)
+            extra = {"reply_markup": markup} if markup else {}
+            try:                                     # أولاً: رابط الصورة مباشرة
+                tg_api(cfg["token"], "sendPhoto", chat_id=ch["chat"], photo=img, caption=cap, parse_mode="HTML", **extra)
+                sent = True
+            except Exception:
+                try:                                 # ثانياً: تنزيل الصورة ورفعها (مواقع تمنع تيليغرام من جلبها)
+                    data, ct = _img_get(img)
+                    if data and len(data) < 9_000_000 and "svg" not in (ct or ""):
+                        tg_api(cfg["token"], "sendPhoto", _files={"photo": ("image.jpg", data, ct or "image/jpeg")},
+                               chat_id=ch["chat"], caption=cap, parse_mode="HTML", **extra)
+                        sent = True
+                except Exception as e:
+                    log.info("telegram photo failed: %s", e)
+    if not sent:
+        params = {"chat_id": ch["chat"], "text": bot_message(row, summ, link), "parse_mode": "HTML",
+                  "link_preview_options": {"is_disabled": not ch["preview"], "url": link} if link else {"is_disabled": True}}
+        if markup:
+            params["reply_markup"] = markup
+        tg_api(cfg["token"], "sendMessage", **params)
     if mark:
-        x("INSERT OR REPLACE INTO tg_sent(id, sent, title) VALUES(?, ?, ?)", (row["id"], now(), row["title_ar"] or row["title"]))
+        x("INSERT OR REPLACE INTO tg_sent2(ch, id, sent, title) VALUES(?, ?, ?, ?)",
+          (ch["id"], row["id"], now(), row["title_ar"] or row["title"]))
     BOT.update(last_sent=now(), last_error="")
+    BOT["errors"].pop(ch["id"], None)
 
 
-def bot_tick(force=False):
+def bot_tick(force=False, ch_id=None):
     cfg = bot_cfg()
-    if not (cfg["token"] and cfg["chat"]) or (not cfg["enabled"] and not force):
+    if not cfg["token"] or (not cfg["enabled"] and not force):
         return False
+    sent = False
     with BOT_LOCK:
-        # تنبيه فوري لكل خبر نوعي جديد (آخر 30 دقيقة)، بفاصل 20 ثانية على الأقل
-        if cfg["instant_qual"] and not force and now() - BOT["last_instant"] >= 20:
-            row = bot_pick(cfg, qual_only=True, fresh_minutes=30)
-            if row:
-                bot_send(row, cfg)
-                BOT["last_instant"] = now()
-                return True
-        if force or now() >= BOT["next_due"]:
-            BOT["next_due"] = now() + int(cfg["interval"])
-            row = bot_pick(cfg)
-            if row:
-                bot_send(row, cfg)
-                return True
-    return False
+        for ch in cfg["channels"]:
+            if not ch["chat"]:
+                continue
+            if force:
+                if ch_id and ch["id"] != ch_id:
+                    continue
+            else:
+                if not ch["on"] or now() < BOT["next"].get(ch["id"], 0):
+                    continue
+                BOT["next"][ch["id"]] = now() + int(ch["interval"])
+                if bot_hold_reason(ch):
+                    continue
+            try:
+                row = bot_pick(ch)
+                if row:
+                    bot_send(row, cfg, ch)
+                    sent = True
+            except Exception as e:
+                BOT["errors"][ch["id"]] = str(e)[:200]
+                BOT["last_error"] = f"{ch['name']}: {str(e)[:180]}"
+                log.warning("telegram bot [%s]: %s", ch["name"], e)
+                if force:
+                    raise
+            if force:
+                break
+    return sent
 
 
 def bot_loop():
@@ -2950,16 +3159,444 @@ def bot_loop():
         time.sleep(5)
 
 
+# ── أوامر البوت: يسألك البوت وأنت بعيد عن الكمبيوتر ──
+def _ago_ar(ts):
+    d = max(0, now() - int(ts or 0))
+    if d < 3600:
+        return f"قبل {max(1, d // 60)} دقيقة"
+    if d < 86400:
+        return f"قبل {d // 3600} ساعة"
+    return f"قبل {d // 86400} يوم"
+
+
+def _tg_list(rows, limit=8):
+    e = html.escape
+    out = []
+    for r in rows[:limit]:
+        t = e((r["title_ar"] or r["title"] or "")[:180])
+        link = r["link"] or ""
+        t = f'<a href="{e(link, quote=True)}">{t}</a>' if link.startswith("http") else t
+        out.append(f"• {t}\n   <i>{e(r['source_ar'] or '')} · {_ago_ar(r['published'])}</i>")
+    return "\n".join(out)
+
+
+def bot_search_rows(query, days=7, limit=8):
+    words = [w for w in _norm_bot(query).split() if len(w) >= 2]
+    words = [re.sub(r"(?<=\w{2})ي[اه]$", "ي", w) for w in words]
+    if not words:
+        return []
+    out = []
+    for r in q("SELECT * FROM items WHERE translated=1 AND published >= ? ORDER BY published DESC LIMIT 6000",
+               (now() - days * 86400,)):
+        txt = _norm_bot(" ".join(filter(None, [r["title_ar"], r["title"], r["summary_ar"]])))
+        if all(w in txt for w in words):
+            out.append(r)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def find_country(name):
+    n = _norm_bot(name).strip()
+    if not n:
+        return None
+    for c in COUNTRY_INFO:
+        if _norm_bot(c) == n:
+            return c
+    for c in COUNTRY_INFO:
+        cn = _norm_bot(c)
+        if n in cn or cn in n:
+            return c
+    return None
+
+
+BOT_HELP = ("🤖 <b>أوامر مركز أبو زبيدة</b>\n\n"
+            "/ابحث <i>كلمة</i> — آخر الأخبار عن موضوع (مثل: /ابحث داعش البادية)\n"
+            "/دولة <i>اسم</i> — آخر أخبار دولة (مثل: /دولة العراق)\n"
+            "/ملخص — الملخص اليومي\n"
+            "/آخر — أحدث الأخبار\n"
+            "/نوعي — الأخبار النوعية خلال 24 ساعة\n"
+            "/انذارات — آخر الإنذارات المبكرة\n\n"
+            "تعمل الأوامر بالإنجليزية أيضاً: /search /country /summary /latest /qual /alerts")
+
+
+def bot_cmd_allowed(cfg, msg):
+    if cfg.get("cmd_mode") == "all":
+        return True
+    chat = msg.get("chat") or {}
+    if any(str(chat.get("id")) == str(ch["chat"]) or (chat.get("username") and ("@" + chat["username"]).lower() == str(ch["chat"]).lower())
+           for ch in cfg["channels"]):
+        return True                  # قنواتك أنت
+    u = msg.get("from") or {}
+    allowed = {str(a).strip().lower().lstrip("@") for a in cfg.get("cmd_users") or [] if str(a).strip()}
+    return str(u.get("id", "")) in allowed or (u.get("username") or "").lower() in allowed
+
+
+def bot_handle_update(cfg, u):
+    msg = u.get("message") or u.get("channel_post") or {}
+    chat = msg.get("chat") or (u.get("my_chat_member") or {}).get("chat")
+    if chat:
+        BOT_CHATS[chat["id"]] = {"id": chat["id"], "type": chat.get("type", ""),
+                                 "name": chat.get("title") or " ".join(filter(None, [chat.get("first_name"), chat.get("last_name")])) or chat.get("username", "")}
+    text = (msg.get("text") or "").strip()
+    if not text.startswith("/") or not chat:
+        return
+    head, _, arg = text.partition(" ")
+    cmd = head[1:].split("@")[0].lower().replace("أ", "ا").replace("إ", "ا").replace("آ", "ا").replace("ة", "ه")
+    arg = arg.strip()
+    token = cfg["token"]
+
+    def reply(t):
+        tg_send_long(token, chat["id"], t)
+
+    if not bot_cmd_allowed(cfg, msg):
+        u = msg.get("from") or {}
+        if u:
+            rq = {"id": u.get("id"), "name": " ".join(filter(None, [u.get("first_name"), u.get("last_name")])),
+                  "username": u.get("username", ""), "t": now()}
+            BOT["requests"] = [r for r in BOT["requests"] if r["id"] != rq["id"]][-9:] + [rq]
+            reply(f"⛔ غير مسموح لك باستخدام أوامر المركز.\nمعرّفك: <code>{u.get('id')}</code>\nاطلب من صاحب المركز إضافتك.")
+        return
+    BOT["cmd_last"] = now()
+    if cmd in ("start", "help", "مساعده", "اوامر", "الاوامر"):
+        return reply(BOT_HELP)
+    if cmd in ("search", "s", "ابحث", "بحث"):
+        if not arg:
+            return reply("اكتب ما تبحث عنه بعد الأمر، مثل: /ابحث هيئة تحرير الشام")
+        rows = bot_search_rows(arg)
+        return reply(f"🔎 <b>نتائج: {html.escape(arg)}</b> (آخر 7 أيام)\n\n" + (_tg_list(rows) or "لا توجد نتائج."))
+    if cmd in ("country", "دوله", "دولة", "بلد"):
+        c = find_country(arg)
+        if not c:
+            return reply("لم أتعرف على الدولة. مثال: /دولة سوريا")
+        rows = q("SELECT * FROM items WHERE countries LIKE ? AND translated=1 ORDER BY published DESC LIMIT 8", (f"%|{c}|%",))
+        n24 = q("SELECT COUNT(*) c FROM items WHERE countries LIKE ? AND published >= ?", (f"%|{c}|%", now() - 86400), one=True)["c"]
+        n7 = q("SELECT COUNT(*) c FROM items WHERE countries LIKE ? AND published >= ?", (f"%|{c}|%", now() - 7 * 86400), one=True)["c"]
+        return reply(f"📍 <b>{html.escape(c)}</b>\nخلال 24 ساعة: {n24} مادة · خلال أسبوع: {n7}\n\n" + (_tg_list(rows) or "لا أخبار."))
+    if cmd in ("summary", "daily", "ملخص", "تقرير"):
+        rep = daily_get(datetime.now().strftime("%Y-%m-%d")) or daily_build(save=False)
+        return reply(rep["tg"])
+    if cmd in ("latest", "news", "اخر", "جديد", "الاخبار"):
+        rows = q("SELECT * FROM items WHERE translated=1 AND kind NOT IN ('tweet','video') ORDER BY published DESC LIMIT 8")
+        return reply("🆕 <b>أحدث الأخبار</b>\n\n" + (_tg_list(rows) or "لا أخبار."))
+    if cmd in ("qual", "نوعي", "عاجل"):
+        rows = q("SELECT * FROM items WHERE events != '' AND events IS NOT NULL AND published >= ? ORDER BY published DESC LIMIT 10",
+                 (now() - 86400,))
+        return reply("🔴 <b>الأخبار النوعية (24 ساعة)</b>\n\n" + (_tg_list(rows, 10) or "لا أحداث نوعية."))
+    if cmd in ("alerts", "انذارات", "انذار"):
+        rows = q("SELECT * FROM alerts ORDER BY created DESC LIMIT 8")
+        t = "\n".join(f"{'🚨' if r['level'] >= 3 else '⚠️'} {html.escape(r['msg'])}\n   <i>{_ago_ar(r['created'])}</i>" for r in rows)
+        return reply("🔔 <b>آخر الإنذارات</b>\n\n" + (t or "لا إنذارات."))
+    return reply("أمر غير معروف.\n\n" + BOT_HELP)
+
+
+def bot_cmd_loop():
+    time.sleep(15)
+    registered = ""
+    while True:
+        cfg = bot_cfg()
+        if not (cfg["token"] and cfg["cmd_on"]):
+            time.sleep(8)
+            continue
+        if registered != cfg["token"]:          # قائمة الأوامر تظهر عند كتابة / في تيليغرام
+            try:
+                tg_api(cfg["token"], "setMyCommands", commands=[
+                    {"command": "search", "description": "ابحث في الأخبار: /search كلمة"},
+                    {"command": "country", "description": "أخبار دولة: /country العراق"},
+                    {"command": "summary", "description": "الملخص اليومي"},
+                    {"command": "latest", "description": "أحدث الأخبار"},
+                    {"command": "qual", "description": "الأخبار النوعية"},
+                    {"command": "alerts", "description": "آخر الإنذارات"},
+                    {"command": "help", "description": "قائمة الأوامر"}])
+                registered = cfg["token"]
+            except Exception:
+                pass
+        try:
+            off = int(kv_get("tg_upd_off") or 0)
+            r = requests.post(f"https://api.telegram.org/bot{cfg['token']}/getUpdates", timeout=40,
+                              json={"offset": off, "timeout": 25,
+                                    "allowed_updates": ["message", "channel_post", "my_chat_member"]})
+            d = r.json()
+            if not d.get("ok"):
+                BOT["cmd_error"] = d.get("description") or f"رمز {r.status_code}"
+                time.sleep(20)
+                continue
+            BOT["cmd_error"] = ""
+            for u in d["result"]:
+                kv_set("tg_upd_off", str(u["update_id"] + 1))
+                try:
+                    bot_handle_update(cfg, u)
+                except Exception as e:
+                    log.warning("bot command: %s", e)
+        except Exception as e:
+            BOT["cmd_error"] = str(e)[:200]
+            time.sleep(15)
+
+
+# ── الملخص اليومي ──
+def daily_cfg():
+    try:
+        c = json.loads(kv_get("daily_cfg") or "{}")
+    except Exception:
+        c = {}
+    c.setdefault("on", True); c.setdefault("hour", 8); c.setdefault("tg", False)
+    c.setdefault("chs", []); c.setdefault("ai", False)
+    return c
+
+
+def daily_get(day):
+    r = q("SELECT * FROM daily_reports WHERE day=?", (day,), one=True)
+    return dict(r) if r else None
+
+
+def _daily_ai(rows):
+    """فقرة «الصورة العامة» بمحرك الكتابة المختار (اختيارية)."""
+    heads = "\n".join(f"- {r['title_ar'] or r['title']} ({r['source_ar']})" for r in rows[:60])
+    prompt = ("هذه أبرز العناوين التي رصدها المركز خلال آخر 24 ساعة:\n" + heads +
+              "\n\nاكتب فقرتين قصيرتين (120 إلى 180 كلمة) بالعربية تلخّصان الصورة العامة لليوم: أهم التطورات وأين تتركز، "
+              "بلغة تقرير استخباراتي موضوعي، دون عناوين ولا تعداد نقطي، ودون اختراع معلومات غير موجودة في العناوين.")
+    fn = {"free": gen_free, "claude": gen_claude, "gemini": gen_gemini, "ollama": gen_ollama}[writer_provider()]
+    out = ""
+    for piece in fn(prompt, 900, system="أنت محلل في مركز رصد. تكتب بالعربية الفصحى بإيجاز ودقة.", min_words=0):
+        if "[[ERROR]]" in piece:
+            break
+        out += piece
+    out = out.replace("[[WAIT]]", "").replace("[[END]]", "").strip()
+    return out if len(out) > 80 else ""
+
+
+def daily_build(save=True, ai=None):
+    """يبني الملخص اليومي لآخر 24 ساعة: HTML للعرض والطباعة، ونص لتيليغرام."""
+    cfg = daily_cfg()
+    ai = cfg["ai"] if ai is None else ai
+    t1 = now()
+    t0 = t1 - 86400
+    day = datetime.now().strftime("%Y-%m-%d")
+    rows = q("SELECT * FROM items WHERE translated=1 AND published >= ? AND published < ? ORDER BY published DESC", (t0, t1))
+    catn = dict((k, n) for k, n, _ in CATEGORIES)
+    cats = Counter(r["cat"] for r in rows)
+    ctry = Counter()
+    for r in rows:
+        ctry.update(c for c in (r["countries"] or "").strip("|").split("|") if c)
+    tags = Counter()
+    for r in rows:
+        tags.update(t for t in (r["tags"] or "").strip("|").split("|") if t and not t.startswith("★") and t not in ctry)
+    qual = sorted([r for r in rows if r["events"]], key=lambda r: (-(r["nsrc"] or 1), -r["published"]))[:10]
+    studies = [r for r in rows if r["cat"] in ("think_global", "think_arab")][:6]
+    alerts = q("SELECT * FROM alerts WHERE created >= ? ORDER BY created DESC LIMIT 8", (t0,))
+    top_c = [c for c, _ in ctry.most_common(6)]
+    by_c = {}
+    for c in top_c:
+        lst = [r for r in rows if f"|{c}|" in (r["countries"] or "")]
+        by_c[c] = sorted(lst, key=lambda r: (-(r["nsrc"] or 1), -r["published"]))[:3]
+    intro = ""
+    if ai and rows:
+        try:
+            pool = qual + [r for r in sorted(rows, key=lambda r: -(r["nsrc"] or 1)) if r not in qual]
+            intro = _daily_ai(pool)
+        except Exception as e:
+            log.info("daily ai: %s", e)
+    e = html.escape
+    dstr = datetime.now().strftime("%Y-%m-%d")
+
+    def li(r):
+        link = r["link"] or ""
+        t = e(r["title_ar"] or r["title"] or "")
+        a = f'<a href="{e(link, quote=True)}" target="_blank" rel="noopener">{t}</a>' if link.startswith("http") else t
+        return f'<li>{a}<span> — {e(r["source_ar"] or "")}{" · ✓ " + str(r["nsrc"]) + " مصادر" if (r["nsrc"] or 1) >= 3 else ""}</span></li>'
+
+    h = [f'<div class="dstat"><span><b>{len(rows)}</b>مادة مرصودة</span><span><b>{len(qual)}</b>خبراً نوعياً</span>'
+         f'<span><b>{len(ctry)}</b>دولة</span><span><b>{len(alerts)}</b>إنذاراً</span></div>']
+    if intro:
+        h.append("<h2>الصورة العامة</h2>" + "".join(f"<p>{e(p_)}</p>" for p_ in intro.split("\n") if p_.strip()))
+    if qual:
+        h.append("<h2>أبرز الأحداث النوعية</h2><ol>" + "".join(li(r) for r in qual) + "</ol>")
+    if top_c:
+        h.append("<h2>الدول الأكثر حضوراً</h2>")
+        for c in top_c:
+            h.append(f'<h3>{e(c)} <small>({ctry[c]} مادة)</small></h3><ul>' + "".join(li(r) for r in by_c[c]) + "</ul>")
+    if alerts:
+        h.append("<h2>الإنذارات المبكرة</h2><ul>" + "".join(f"<li>{e(a['msg'])}</li>" for a in alerts) + "</ul>")
+    if studies:
+        h.append("<h2>دراسات ومقالات مختارة</h2><ul>" + "".join(li(r) for r in studies) + "</ul>")
+    if tags:
+        h.append("<h2>المواضيع الأكثر تداولاً</h2><p>" + "، ".join(f"{e(t)} ({n})" for t, n in tags.most_common(12)) + "</p>")
+    if cats:
+        h.append("<h2>توزيع المواد على الأقسام</h2><p>" + "، ".join(f"{e(catn.get(k, k))}: {n}" for k, n in cats.most_common()) + "</p>")
+    if not rows:
+        h.append("<p>لم تُرصد مواد مترجمة خلال آخر 24 ساعة.</p>")
+    html_body = "".join(h)
+
+    def tl(r):
+        link = r["link"] or ""
+        t = e((r["title_ar"] or r["title"] or "")[:170])
+        return f'• <a href="{e(link, quote=True)}">{t}</a>' if link.startswith("http") else f"• {t}"
+
+    g = [f"📋 <b>الملخص اليومي — {dstr}</b>",
+         f"<i>{len(rows)} مادة · {len(qual)} خبراً نوعياً · {len(ctry)} دولة · {len(alerts)} إنذاراً</i>"]
+    if intro:
+        g += ["", "🧭 <b>الصورة العامة</b>", e(intro)]
+    if qual:
+        g += ["", "🔴 <b>أبرز الأحداث النوعية</b>"] + [tl(r) for r in qual[:7]]
+    if top_c:
+        g += ["", "📍 <b>الدول الأكثر حضوراً</b>"]
+        for c in top_c[:5]:
+            g.append(f"<b>{e(c)}</b> ({ctry[c]})")
+            g += [tl(r) for r in by_c[c][:2]]
+    if alerts:
+        g += ["", "🔔 <b>الإنذارات</b>"] + [f"• {e(a['msg'])}" for a in alerts[:5]]
+    if studies:
+        g += ["", "📚 <b>دراسات مختارة</b>"] + [tl(r) for r in studies[:4]]
+    g += ["", "<i>مركز أبو زبيدة للتتبع والرصد</i>"]
+    rep = {"day": day, "created": t1, "html": html_body, "tg": "\n".join(g), "n": len(rows), "ai": 1 if intro else 0}
+    if save:
+        x("INSERT OR REPLACE INTO daily_reports(day, created, html, tg, n, ai) VALUES(?,?,?,?,?,?)",
+          (rep["day"], rep["created"], rep["html"], rep["tg"], rep["n"], rep["ai"]))
+        x("DELETE FROM daily_reports WHERE day NOT IN (SELECT day FROM daily_reports ORDER BY day DESC LIMIT 90)")
+    return rep
+
+
+def daily_send(rep, ch_ids=None):
+    cfg = bot_cfg()
+    if not cfg["token"]:
+        raise ValueError("أضف رمز البوت أولاً من صفحة البوت")
+    dc = daily_cfg()
+    ids = ch_ids if ch_ids is not None else dc["chs"]
+    targets = [ch for ch in cfg["channels"] if ch["chat"] and (not ids or ch["id"] in ids)]
+    if not targets:
+        raise ValueError("لا توجد قناة محددة لإرسال الملخص")
+    for ch in targets:
+        tg_send_long(cfg["token"], ch["chat"], rep["tg"])
+    return len(targets)
+
+
+def daily_loop():
+    time.sleep(60)
+    while True:
+        try:
+            c = daily_cfg()
+            day = datetime.now().strftime("%Y-%m-%d")
+            if c["on"] and datetime.now().hour >= int(c["hour"]) and not daily_get(day):
+                rep = daily_build()
+                log.info("أُنشئ الملخص اليومي (%s مادة)", rep["n"])
+                if c["tg"]:
+                    try:
+                        daily_send(rep)
+                    except Exception as e:
+                        log.warning("daily to telegram: %s", e)
+        except Exception:
+            log.exception("daily")
+        time.sleep(120)
+
+
+@app.get("/api/daily")
+def api_daily():
+    days = [dict(r) for r in q("SELECT day, created, n, ai FROM daily_reports ORDER BY day DESC LIMIT 60")]
+    day = request.args.get("day") or (days[0]["day"] if days else "")
+    rep = daily_get(day) if day else None
+    cfg = bot_cfg()
+    return jsonify(cfg=daily_cfg(), days=days, report=rep, provider=writer_provider(),
+                   channels=[{"id": ch["id"], "name": ch["name"], "ready": bool(ch["chat"])} for ch in cfg["channels"]],
+                   has_token=bool(cfg["token"]))
+
+
+@app.post("/api/daily")
+def api_daily_set():
+    b = request.get_json(silent=True) or {}
+    c = daily_cfg()
+    for k in ("on", "tg", "ai"):
+        if k in b:
+            c[k] = bool(b[k])
+    if "hour" in b:
+        c["hour"] = min(23, max(0, int(b["hour"])))
+    if isinstance(b.get("chs"), list):
+        c["chs"] = [str(v) for v in b["chs"]]
+    kv_set("daily_cfg", json.dumps(c, ensure_ascii=False))
+    return jsonify(ok=True)
+
+
+@app.post("/api/daily/build")
+def api_daily_build():
+    b = request.get_json(silent=True) or {}
+    rep = daily_build(ai=b.get("ai"))
+    return jsonify(ok=True, day=rep["day"])
+
+
+@app.post("/api/daily/send")
+def api_daily_send():
+    b = request.get_json(silent=True) or {}
+    rep = daily_get(b.get("day") or "") or daily_build()
+    try:
+        n = daily_send(rep)
+        return jsonify(ok=True, n=n)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)[:200]), 400
+
+
+@app.get("/print/daily/<day>")
+def print_daily(day):
+    rep = daily_get(day)
+    if not rep:
+        return Response("لا يوجد ملخص لهذا اليوم", status=404)
+    page = f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>الملخص اليومي {html.escape(day)}</title>
+<style>@page{{size:A4;margin:16mm}}body{{font:13pt/1.9 Tahoma,Arial,sans-serif;color:#111;max-width:800px;margin:0 auto;padding:20px}}
+h1{{font-size:21pt;margin:0 0 4px;border-bottom:3px solid #8E6F35;padding-bottom:8px}}.sub{{color:#666;font-size:11pt;margin-bottom:16px}}
+h2{{font-size:14.5pt;margin:20px 0 6px;color:#0A3D7A}}h3{{font-size:12.5pt;margin:12px 0 4px}}h3 small{{color:#777;font-weight:400}}
+li{{margin-bottom:5px}}li span{{color:#666;font-size:10.5pt}}a{{color:#111;text-decoration:none}}
+.dstat{{display:flex;gap:10px;margin:10px 0}}.dstat span{{flex:1;border:1px solid #ccc;border-radius:6px;padding:6px;text-align:center;font-size:10.5pt;color:#555}}
+.dstat b{{display:block;font-size:17pt;color:#111}}
+.tools{{position:fixed;top:12px;left:12px}}.tools button{{font:600 14px Tahoma;padding:9px 18px;border:0;border-radius:6px;background:#8E6F35;color:#fff;cursor:pointer}}
+@media print{{.tools{{display:none}}}}</style></head><body><div class="tools"><button onclick="print()">طباعة / حفظ PDF</button></div>
+<h1>الملخص اليومي</h1><div class="sub">مركز أبو زبيدة للتتبع والرصد · {html.escape(day)} · آخر 24 ساعة حتى {datetime.fromtimestamp(rep['created']).strftime('%H:%M')}</div>
+{rep['html']}<script>addEventListener('load',()=>setTimeout(()=>print(),600))</script></body></html>"""
+    return Response(page, mimetype="text/html; charset=utf-8")
+
+
+# ── واجهة إعداد البوت ──
 @app.get("/api/bot")
 def api_bot():
     cfg = bot_cfg()
-    day0 = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
-    sent_today = q("SELECT COUNT(*) c FROM tg_sent WHERE sent >= ?", (day0,), one=True)["c"]
-    recent = [dict(r) for r in q("SELECT * FROM tg_sent ORDER BY sent DESC LIMIT 12")]
     tok = cfg["token"]
-    return jsonify(cfg={**cfg, "token": "", "has_token": bool(tok), "token_hint": (tok[:6] + "…" + tok[-4:]) if tok else ""},
-                   state={**BOT, "now": now(), "sent_today": sent_today}, recent=recent,
+    chans = []
+    for ch in cfg["channels"]:
+        chans.append({**ch, "sent_today": bot_sent_today(ch["id"]), "hold": bot_hold_reason(ch),
+                      "next_due": BOT["next"].get(ch["id"], 0), "error": BOT["errors"].get(ch["id"], ""),
+                      "recent": [dict(r) for r in q("SELECT * FROM tg_sent2 WHERE ch=? ORDER BY sent DESC LIMIT 10", (ch["id"],))]})
+    pub = {k: v for k, v in cfg.items() if k not in ("token", "channels")}
+    return jsonify(cfg={**pub, "has_token": bool(tok), "token_hint": (tok[:6] + "…" + tok[-4:]) if tok else ""},
+                   channels=chans,
+                   state={"now": now(), "bot_name": BOT["bot_name"], "last_sent": BOT["last_sent"], "last_error": BOT["last_error"],
+                          "sent_today": bot_sent_today(), "cmd_error": BOT["cmd_error"], "cmd_last": BOT["cmd_last"],
+                          "requests": BOT["requests"][::-1]},
                    cats=[{"key": k, "name": n} for k, n, _ in CATEGORIES if k in BOT_ALLOWED_CATS])
+
+
+def _ch_update(ch, b):
+    if "chat" in b:
+        ch["chat"] = str(b["chat"]).strip()
+    if "name" in b and str(b["name"]).strip():
+        ch["name"] = str(b["name"]).strip()[:40]
+    if "interval" in b:
+        ch["interval"] = min(86400, max(30, int(b["interval"])))
+        BOT["next"][ch["id"]] = min(BOT["next"].get(ch["id"], 0), now() + ch["interval"])
+    for k, lo, hi in (("max_day", 0, 2000), ("hours_from", 0, 23), ("hours_to", 0, 24), ("fresh_h", 1, 720)):
+        if k in b:
+            try:
+                ch[k] = min(hi, max(lo, int(b[k])))
+            except (TypeError, ValueError):
+                pass
+    for k in ("inc", "exc"):
+        if k in b:
+            v = b[k]
+            lines = v.splitlines() if isinstance(v, str) else list(v or [])
+            ch[k] = [str(ln).strip() for ln in lines if str(ln).strip()][:200]
+    if b.get("scope") in ("title", "all"):
+        ch["scope"] = b["scope"]
+    if isinstance(b.get("cats"), list):
+        ch["cats"] = b["cats"]
+    for k in ("on", "preview", "photo"):
+        if k in b:
+            ch[k] = bool(b[k])
 
 
 @app.post("/api/bot")
@@ -2974,21 +3611,72 @@ def api_bot_set():
             return jsonify(ok=False, error=f"رمز البوت غير صحيح: {e}"), 400
         cfg["token"] = tok
         BOT["bot_name"] = me.get("username", "")
-    if "chat" in b:
-        cfg["chat"] = str(b["chat"]).strip()
-    if "interval" in b:
-        cfg["interval"] = max(60, int(b["interval"]))
-    if isinstance(b.get("cats"), list):
-        cfg["cats"] = b["cats"]
-    for k in ("enabled", "preview"):
+    for k in ("enabled", "cmd_on"):
         if k in b:
             cfg[k] = bool(b[k])
-    if cfg["enabled"] and not (cfg["token"] and cfg["chat"]):
-        return jsonify(ok=False, error="أضف رمز البوت ومعرّف المحادثة أولاً"), 400
-    kv_set("bot_cfg", json.dumps(cfg, ensure_ascii=False))
+    if b.get("cmd_mode") in ("allow", "all"):
+        cfg["cmd_mode"] = b["cmd_mode"]
+    if "cmd_users" in b:
+        v = b["cmd_users"]
+        lines = re.split(r"[\s,،]+", v) if isinstance(v, str) else list(v or [])
+        cfg["cmd_users"] = [str(a).strip() for a in lines if str(a).strip()][:100]
+    if b.get("cmd_add"):
+        a = str(b["cmd_add"]).strip()
+        if a and a not in cfg["cmd_users"]:
+            cfg["cmd_users"].append(a)
+        BOT["requests"] = [r for r in BOT["requests"] if str(r["id"]) != a]
+    if b.get("ch"):
+        ch = bot_channel(cfg, b["ch"])
+        if not ch:
+            return jsonify(ok=False, error="القناة غير موجودة"), 404
+        _ch_update(ch, b)
+    if cfg["enabled"] and not (cfg["token"] and any(ch["chat"] for ch in cfg["channels"])):
+        return jsonify(ok=False, error="أضف رمز البوت ومعرّف قناة واحدة على الأقل"), 400
+    bot_save(cfg)
     if b.get("enabled"):
-        BOT["next_due"] = now() + 3
+        BOT["next"] = {}
     return jsonify(ok=True)
+
+
+@app.post("/api/bot/channel")
+def api_bot_channel_add():
+    b = request.get_json(silent=True) or {}
+    cfg = bot_cfg()
+    if len(cfg["channels"]) >= 20:
+        return jsonify(ok=False, error="الحد 20 قناة"), 400
+    ch = _ch_norm({"name": (b.get("name") or f"قناة {len(cfg['channels']) + 1}").strip()[:40]})
+    cfg["channels"].append(ch)
+    bot_save(cfg)
+    return jsonify(ok=True, id=ch["id"])
+
+
+@app.delete("/api/bot/channel/<cid>")
+def api_bot_channel_del(cid):
+    cfg = bot_cfg()
+    if len(cfg["channels"]) <= 1:
+        return jsonify(ok=False, error="يجب أن تبقى قناة واحدة على الأقل"), 400
+    cfg["channels"] = [ch for ch in cfg["channels"] if ch["id"] != cid]
+    bot_save(cfg)
+    x("DELETE FROM tg_sent2 WHERE ch=?", (cid,))
+    return jsonify(ok=True)
+
+
+@app.post("/api/bot/preview")
+def api_bot_preview():
+    """يعرض أحدث العناوين التي تطابق فلتر القناة (دون إرسال)."""
+    cfg = bot_cfg()
+    b = request.get_json(silent=True) or {}
+    ch = dict(bot_channel(cfg, b.get("ch")) or cfg["channels"][0])
+    for k in ("inc", "exc"):
+        if k in b:
+            ch[k] = [ln.strip() for ln in str(b[k]).splitlines() if ln.strip()]
+    if b.get("scope") in ("title", "all"):
+        ch["scope"] = b["scope"]
+    rows = _bot_candidates(ch, limit=600, unsent=False)
+    hit = [r for r in rows if bot_match(r, ch)]
+    return jsonify(total=len(rows), matched=len(hit),
+                   items=[{"id": r["id"], "title": r["title_ar"] or r["title"], "source": r["source_ar"], "published": r["published"]}
+                          for r in hit[:8]])
 
 
 @app.get("/api/bot/chats")
@@ -2996,28 +3684,31 @@ def api_bot_chats():
     cfg = bot_cfg()
     if not cfg["token"]:
         return jsonify(ok=False, error="أضف رمز البوت أولاً"), 400
-    try:
-        ups = tg_api(cfg["token"], "getUpdates", limit=100, allowed_updates=["message", "channel_post", "my_chat_member"])
-    except Exception as e:
-        return jsonify(ok=False, error=str(e)), 400
-    chats = {}
-    for u in ups:
-        for key in ("message", "channel_post", "my_chat_member"):
-            c = (u.get(key) or {}).get("chat")
-            if c:
-                chats[c["id"]] = {"id": c["id"], "type": c.get("type", ""),
-                                  "name": c.get("title") or " ".join(filter(None, [c.get("first_name"), c.get("last_name")])) or c.get("username", "")}
+    chats = dict(BOT_CHATS)
+    if not cfg["cmd_on"]:                    # حين تعمل الأوامر يقرأ البوت الرسائل بنفسه فلا نكرر القراءة
+        try:
+            ups = tg_api(cfg["token"], "getUpdates", limit=100, allowed_updates=["message", "channel_post", "my_chat_member"])
+        except Exception as e:
+            return jsonify(ok=False, error=str(e)), 400
+        for u in ups:
+            for key in ("message", "channel_post", "my_chat_member"):
+                c = (u.get(key) or {}).get("chat")
+                if c:
+                    chats[c["id"]] = {"id": c["id"], "type": c.get("type", ""),
+                                      "name": c.get("title") or " ".join(filter(None, [c.get("first_name"), c.get("last_name")])) or c.get("username", "")}
     return jsonify(ok=True, chats=list(chats.values()))
 
 
 @app.post("/api/bot/test")
 def api_bot_test():
     cfg = bot_cfg()
-    if not (cfg["token"] and cfg["chat"]):
-        return jsonify(ok=False, error="أضف رمز البوت ومعرّف المحادثة أولاً"), 400
+    b = request.get_json(silent=True) or {}
+    ch = bot_channel(cfg, b.get("ch")) or cfg["channels"][0]
+    if not (cfg["token"] and ch["chat"]):
+        return jsonify(ok=False, error="أضف رمز البوت ومعرّف القناة أولاً"), 400
     try:
-        tg_api(cfg["token"], "sendMessage", chat_id=cfg["chat"], parse_mode="HTML",
-               text="✅ <b>تم ربط البوت بنجاح</b>\nمركز أبو زبيدة للتتبع والرصد سيرسل هنا ملخصات المقالات المترجمة.")
+        tg_api(cfg["token"], "sendMessage", chat_id=ch["chat"], parse_mode="HTML",
+               text=f"✅ <b>تم ربط البوت بنجاح</b>\nمركز أبو زبيدة للتتبع والرصد سيرسل هنا ({html.escape(ch['name'])}) ملخصات المقالات المترجمة.")
         return jsonify(ok=True)
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 400
@@ -3025,8 +3716,9 @@ def api_bot_test():
 
 @app.post("/api/bot/send-now")
 def api_bot_send_now():
+    b = request.get_json(silent=True) or {}
     try:
-        sent = bot_tick(force=True)
+        sent = bot_tick(force=True, ch_id=b.get("ch"))
         return jsonify(ok=True, sent=sent)
     except Exception as e:
         BOT["last_error"] = str(e)[:200]
@@ -3035,7 +3727,11 @@ def api_bot_send_now():
 
 @app.post("/api/bot/reset")
 def api_bot_reset():
-    x("DELETE FROM tg_sent")
+    b = request.get_json(silent=True) or {}
+    if b.get("ch"):
+        x("DELETE FROM tg_sent2 WHERE ch=?", (b["ch"],))
+    else:
+        x("DELETE FROM tg_sent2")
     return jsonify(ok=True)
 
 
@@ -3162,7 +3858,14 @@ def alerts_pass():
                            text=f"{'🚨' if a_['level'] >= 3 else '⚠️'} <b>إنذار مبكر</b>\n{html.escape(a_['msg'])}\n\n<i>مركز أبو زبيدة للتتبع والرصد</i>")
         except Exception as e:
             log.warning("alert to telegram failed: %s", e)
-    x("DELETE FROM alerts WHERE created < ?", (t - 14 * 86400,))
+    trim_alerts()
+
+
+ALERTS_KEEP = 15            # لا يُحتفظ إلا بآخر 15 إنذاراً، والأقدم يُحذف تلقائياً
+
+
+def trim_alerts():
+    x("DELETE FROM alerts WHERE id NOT IN (SELECT id FROM alerts ORDER BY created DESC LIMIT ?)", (ALERTS_KEEP,))
 
 
 def analysis_loop():
@@ -3186,7 +3889,7 @@ def analysis_loop():
 @app.get("/api/alerts")
 def api_alerts():
     hours = int(request.args.get("hours") or 48)
-    rows = q("SELECT * FROM alerts WHERE created >= ? ORDER BY created DESC LIMIT 200", (now() - hours * 3600,))
+    rows = q("SELECT * FROM alerts WHERE created >= ? ORDER BY created DESC LIMIT ?", (now() - hours * 3600, ALERTS_KEEP))
     return jsonify(items=[dict(r) for r in rows], now=now())
 
 
@@ -3321,6 +4024,7 @@ def fetch_ioda():
         msg = f"انقطاع إنترنت حرج في {r_['name']}: هبوط في {NET_SRC_AR.get(r_['source'], r_['source'])}{drop}"
         x("INSERT OR IGNORE INTO alerts(id, kind, key, level, cnt, base, created, msg, detail) VALUES(?,?,?,?,?,?,?,?,?)",
           (hashlib.sha1(f"net|{r_['name']}|{t}".encode()).hexdigest()[:16], "net", r_["name"], 3, 1, 0, t, msg, r_["iso"]))
+    trim_alerts()
     NET.update(last=t, error="")
     set_status("رصد انقطاع الإنترنت (IODA)", "official", True, len(rows), "IODA", "")
     return len(rows)
@@ -3424,8 +4128,15 @@ UPDATE = {"state": "", "last": 0, "ready": False, "remote_version": "", "error":
 
 
 def update_cfg():
-    return {"repo": (kv_get("upd_repo") or DEFAULT_REPO).strip().strip("/"),
-            "branch": (kv_get("upd_branch") or "main").strip(), "auto": kv_get("upd_auto", "1") == "1"}
+    # مصدر التحديث ثابت لا يُغيَّر من الواجهة
+    return {"repo": DEFAULT_REPO, "branch": "main", "auto": kv_get("upd_auto", "1") == "1"}
+
+
+def _ver_tuple(v):
+    try:
+        return tuple(int(x) for x in re.findall(r"\d+", v or ""))
+    except Exception:
+        return ()
 
 
 def _local_hash():
@@ -3452,8 +4163,8 @@ def check_update(apply=True):
         m = re.search(rb'^VERSION\s*=\s*"([^"]+)"', code, re.M)
         rv = m.group(1).decode() if m else ""
         UPDATE.update(last=now(), remote_version=rv)
-        if h == _local_hash():
-            UPDATE.update(state="البرنامج محدَّث", ready=False)
+        if h == _local_hash() or (rv and _ver_tuple(rv) <= _ver_tuple(VERSION)):
+            UPDATE.update(state="البرنامج محدَّث", ready=False)       # لا ننزل أبداً إلى إصدار أقدم أو مساوٍ
             return UPDATE
         try:
             compile(code.decode("utf-8"), "rased.py", "exec")
@@ -3506,10 +4217,6 @@ def api_update():
 @app.post("/api/update")
 def api_update_set():
     b = request.get_json(silent=True) or {}
-    if b.get("repo"):
-        kv_set("upd_repo", re.sub(r"^https?://github\.com/", "", b["repo"].strip()).strip("/"))
-    if b.get("branch"):
-        kv_set("upd_branch", b["branch"].strip())
     if "auto" in b:
         kv_set("upd_auto", "1" if b["auto"] else "0")
     return jsonify(ok=True)
@@ -4105,6 +4812,36 @@ def pwa_manifest():
                    dir="rtl", lang="ar", background_color="#060B13", theme_color="#060B13",
                    icons=[{"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
                           {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}])
+
+
+FLAG_SY = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 600"><rect width="900" height="600" fill="#000"/><rect width="900" height="400" fill="#fff"/><rect width="900" height="200" fill="#007A3D"/><g fill="#CE1126"><polygon points="270.0,238.0 283.9,280.8 329.0,280.8 292.5,307.3 306.4,350.2 270.0,323.7 233.6,350.2 247.5,307.3 211.0,280.8 256.1,280.8"/><polygon points="450.0,238.0 463.9,280.8 509.0,280.8 472.5,307.3 486.4,350.2 450.0,323.7 413.6,350.2 427.5,307.3 391.0,280.8 436.1,280.8"/><polygon points="630.0,238.0 643.9,280.8 689.0,280.8 652.5,307.3 666.4,350.2 630.0,323.7 593.6,350.2 607.5,307.3 571.0,280.8 616.1,280.8"/></g></svg>'''          # علم سوريا الحالي (الأخضر والأبيض والأسود مع ثلاث نجوم حمراء)
+
+
+@app.get("/flag/<code>")
+def flag_img(code):
+    """علم الدولة: يُجلب من flagcdn مرة واحدة ثم يُحفظ في مجلد flags بجانب البرنامج."""
+    code = (code or "").lower()[:2]
+    if not re.fullmatch(r"[a-z]{2}", code):
+        return Response(status=404)
+    if code == "sy":
+        r_ = Response(FLAG_SY, mimetype="image/svg+xml")
+        r_.headers["Cache-Control"] = "public, max-age=604800"
+        return r_
+    d = os.path.join(BASE_DIR, "flags")
+    pth = os.path.join(d, code + ".png")
+    if not os.path.exists(pth):
+        try:
+            r = requests.get(f"https://flagcdn.com/w80/{code}.png", headers=HEADERS, timeout=15)
+            if r.status_code != 200 or not r.content.startswith(b"\x89PNG"):
+                return Response(status=404)
+            os.makedirs(d, exist_ok=True)
+            with open(pth + ".tmp", "wb") as f:
+                f.write(r.content)
+            os.replace(pth + ".tmp", pth)
+        except Exception:
+            return Response(status=404)
+    r_ = send_file(pth, mimetype="image/png", max_age=604800)
+    return r_
 
 
 @app.get("/icon-192.png")
@@ -4838,13 +5575,13 @@ svg.i{width:17px;height:17px;flex:none;fill:none;stroke:currentColor;stroke-widt
 @keyframes sweep{to{transform:rotate(360deg)}}
 .brand b{display:block;font:800 18px/1.3 var(--fd)}
 .brand small{display:block;font:500 9.5px var(--fm);letter-spacing:.2em;color:var(--acc);direction:ltr;text-align:right}
-.search{flex:1;max-width:520px;margin-inline-start:24px;position:relative;display:flex;align-items:center}
+.search{flex:1 1 380px;min-width:300px;max-width:560px;margin-inline-start:18px;position:relative;display:flex;align-items:center}
 .search svg{position:absolute;right:12px;color:var(--faint);pointer-events:none}
-.search input{width:100%;height:38px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:0 38px 0 40px}
+.search input{width:100%;min-width:0;height:38px;font-size:14px;text-overflow:ellipsis;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:0 38px 0 40px}
 .search input:focus{outline:none;border-color:var(--acc)}
 .search kbd{position:absolute;left:10px;font:11px var(--fm);color:var(--faint);border:1px solid var(--border);border-radius:4px;padding:0 6px}
 .sp{flex:1}
-.clocks{display:flex;gap:14px;font:500 10px var(--fm);color:var(--faint);letter-spacing:.04em}
+.clocks{display:flex;gap:14px;min-width:0;overflow:hidden;font:500 10px var(--fm);color:var(--faint);letter-spacing:.04em}
 .clock{text-align:center;line-height:1.3}
 .clock b{display:block;font:600 13.5px var(--fm);color:var(--text)}
 .ibtn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:36px;min-width:36px;padding:0 12px;border-radius:var(--r);border:1px solid var(--border);background:var(--surface);white-space:nowrap;text-decoration:none;font-size:13.5px}
@@ -5111,6 +5848,7 @@ button.tag:hover{color:var(--text);border-color:var(--border2)}
 .ctycard .top2{display:flex;align-items:center;gap:10px}
 .iso{width:38px;height:28px;flex:none;display:grid;place-items:center;border:1px solid var(--border2);border-radius:4px;font:600 12px var(--fm);color:var(--acc2);background:var(--surface2)}
 .iso.big{width:72px;height:52px;font-size:20px}
+.iso.flag{padding:0;overflow:hidden;background:var(--surface2)}.iso.flag img{width:100%;height:100%;object-fit:cover;display:block}
 .ctycard b{font:700 14.5px var(--fd)}
 .ctycard .nums{display:flex;justify-content:space-between;font-size:12px;color:var(--faint)}
 .ctycard .nums em{font:600 15px var(--fm);font-style:normal;color:var(--text);margin-inline-end:4px}
@@ -5212,30 +5950,18 @@ button.tag:hover{color:var(--text);border-color:var(--border2)}
 .tlit:hover{background:var(--hover)}
 .tlit time{font:600 13px var(--fm);color:var(--text)}
 .tlit .t{font:600 14px/1.65 var(--fd)}
-/* الشاشة الكبيرة */
-#wall{position:fixed;inset:0;z-index:200;background:var(--bg);display:flex;flex-direction:column}
-#wall .wtop{display:flex;align-items:center;gap:16px;padding:12px 22px;border-bottom:1px solid var(--border2);background:var(--bg2)}
-.wbrand{font:800 22px var(--fd)}
-.wslide{font:700 16px var(--fd);color:var(--acc2);padding:2px 12px;border:1px solid var(--border2);border-radius:var(--r)}
-.wclock{font-size:26px;font-weight:600}
-.wbody{flex:1;position:relative;overflow:hidden}
-#wmap{position:absolute;inset:0}
-#wpanel{position:absolute;inset:0;padding:22px;overflow:hidden}
-.wallprog{height:3px;flex:none;background:var(--line)}.wallprog i{display:block;height:100%;width:0;background:var(--acc)}
-.wallprog i.run{animation:qbar 20s linear forwards}
-.wtick{display:flex;height:44px;border-top:1px solid var(--border2);background:var(--bg2)}
-.wtick .lbl{flex:none;display:flex;align-items:center;padding:0 18px;background:var(--red);color:#fff;font:800 15px var(--fd)}
-.wtick .track{flex:1;position:relative;overflow:hidden}
-.wtick .run{position:absolute;left:0;top:0;white-space:nowrap;line-height:44px;font-size:17px;animation:tick 200s linear infinite}
-.wtick .run span{margin:0 26px}
-.wgrid2{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;height:100%}
-.wcard{padding:18px;border:1px solid var(--border2);border-radius:var(--r-lg);background:var(--surface);border-top:4px solid var(--e,var(--acc));display:flex;flex-direction:column;gap:8px;overflow:hidden}
-.wcard h3{margin:0;font:800 21px/1.55 var(--fd)}
-.wcard .meta{font-size:14px}
-.wbig{font:800 26px var(--fd);margin-bottom:12px}
-.wcols{display:grid;grid-template-columns:1fr 1fr;gap:20px;height:100%}
-.wlist .al{margin-bottom:10px}
-.wlist .al b{font-size:17px}
+/* ادعم المشروع */
+.ibtn.support{color:#F43F5E;border-color:rgba(244,63,94,.45);font-weight:700}
+.ibtn.support svg{fill:rgba(244,63,94,.25)}
+.ibtn.support:hover{background:rgba(244,63,94,.12)}
+.supdlg{width:min(420px,92vw);padding:0;border:1px solid var(--border2);border-radius:var(--r-lg);background:var(--bg2);color:var(--text)}
+.supdlg::backdrop{background:rgba(2,6,14,.6)}
+.suphead{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--border)}
+.suphead svg{color:#F43F5E;fill:rgba(244,63,94,.3)}.suphead b{flex:1;font:800 16px var(--fd)}
+.suphead .x{background:none;border:0;color:var(--muted);font-size:22px;cursor:pointer}
+.supdlg p{margin:14px 18px;line-height:1.9;font-size:14px;color:var(--muted)}
+.supacts{display:flex;flex-direction:column;gap:10px;margin:0 18px}.supacts .ibtn{height:42px;font-size:14.5px}
+.supdlg .supdev{font-size:12.5px;text-align:center;color:var(--faint)}
 /* لوحة الأوامر */
 #cmdk{position:fixed;inset:0;z-index:210;background:rgba(2,6,14,.6);backdrop-filter:blur(3px);display:flex;justify-content:center;align-items:flex-start;padding-top:12vh}
 .cmdbox{width:min(640px,94vw);background:var(--surface);border:1px solid var(--border2);border-radius:12px;box-shadow:0 30px 80px -20px rgba(0,0,0,.8),0 0 30px -8px rgba(30,167,255,.5);overflow:hidden}
@@ -5357,7 +6083,7 @@ button.tag:hover{color:var(--text);border-color:var(--border2)}
 .botgrid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:18px;align-items:start}
 .bbody{padding:16px;display:flex;flex-direction:column;gap:14px}
 .bbody label.f{display:flex;flex-direction:column;gap:6px;font:600 13px var(--fd)}
-.bbody input[type=text],.bbody input[type=password],.bbody select{height:38px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);padding:0 12px;font:400 14px "IBM Plex Sans Arabic";color:var(--text);max-width:none}
+.bbody input[type=text],.bbody input[type=password],.bbody input[type=number],.bbody select{height:38px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);padding:0 12px;font:400 14px "IBM Plex Sans Arabic";color:var(--text);max-width:none}
 .bbody .ltr{direction:ltr;text-align:left}
 .bbody .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .bbody .row input{flex:1;min-width:200px}
@@ -5381,6 +6107,39 @@ button.tag:hover{color:var(--text);border-color:var(--border2)}
 .sw input:checked+span{background:var(--green)}
 .sw input:checked+span::before{right:23px}
 .sw input:focus-visible+span{outline:1.5px solid var(--focus)}
+.bflt{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:8px 0}.bflt b{display:block;font-size:13px;margin-bottom:6px}
+.bflt textarea{width:100%;box-sizing:border-box;resize:vertical;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);padding:8px 10px;color:var(--text);font:14px/1.8 var(--fb,inherit)}
+.bprev{margin-top:8px;font-size:13px}.bprev ul{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+.bprev li{display:flex;flex-direction:column;padding:6px 10px;border:1px solid var(--border);border-radius:var(--r);background:var(--surface)}
+.bprev li .t{all:unset;cursor:pointer;font-weight:600}.bprev li span{font-size:11.5px;color:var(--faint)}
+@media (max-width:820px){.bflt{grid-template-columns:1fr}}
+.dailygrid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:18px;align-items:start}
+@media (max-width:1100px){.dailygrid{grid-template-columns:1fr}}
+.dsel{height:34px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);color:var(--text);padding:0 8px}
+.dailybody{padding:18px 22px;line-height:2}
+.dailybody h2{font:800 17px var(--fd);margin:22px 0 8px;color:var(--acc)}
+.dailybody h3{font:700 15px var(--fd);margin:14px 0 4px}.dailybody h3 small{color:var(--faint);font-weight:400}
+.dailybody ol,.dailybody ul{margin:0;padding-inline-start:22px}.dailybody li{margin-bottom:6px}
+.dailybody li a{color:var(--text);text-decoration:none}.dailybody li a:hover{color:var(--acc)}
+.dailybody li span{color:var(--faint);font-size:12.5px}.dailybody p{margin:0 0 10px;color:var(--muted)}
+.dailybody .dmeta{font-size:12px;color:var(--faint)}
+.dstat{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:12px 0}
+.dstat span{border:1px solid var(--border);border-radius:var(--r);padding:10px;text-align:center;font-size:12.5px;color:var(--muted);background:var(--surface)}
+.dstat b{display:block;font:700 22px var(--fm);color:var(--text)}
+.chtabs{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.chtabs button{all:unset;cursor:pointer;padding:7px 14px;border:1px solid var(--border);border-radius:var(--r);font:600 13px var(--fd);background:var(--surface)}
+.chtabs button.on{border-color:var(--acc);background:var(--accbg);color:var(--acc)}
+.chtabs button.add{border-style:dashed;color:var(--muted)}
+.chbox{border:1px solid var(--border2);border-radius:var(--r-lg);padding:14px;display:flex;flex-direction:column;gap:14px;background:var(--surface)}
+.chsum{display:flex;flex-direction:column;gap:4px;margin:10px 0}
+.chsum button{all:unset;cursor:pointer;display:flex;align-items:center;gap:8px;padding:4px 10px;border-radius:var(--r);border:1px solid transparent}
+.chsum button.on{border-color:var(--border2);background:var(--surface2)}
+.chsum i{width:8px;height:8px;border-radius:50%;background:var(--faint)}.chsum i.g{background:var(--green)}.chsum i.w{background:#F59E0B}
+.chsum b{flex:1;font-family:inherit}.chsum span{font-size:12px;color:var(--faint)}
+.chst{border-top:1px solid var(--line);padding-top:8px;margin-top:4px}
+.cmdbox2{display:flex;flex-direction:column;gap:10px;margin-top:6px}
+.cmdbox2 textarea{width:100%;box-sizing:border-box;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);padding:8px 10px;color:var(--text);font:14px/1.7 var(--fm)}
+.cmdlist{display:flex;flex-wrap:wrap;gap:6px}.cmdlist code{font-size:12.5px;padding:3px 8px;border:1px solid var(--border);border-radius:4px;background:var(--surface2)}
 .bstat{padding:14px 16px;font-size:13.5px;line-height:2.1;color:var(--muted)}
 .bstat b{color:var(--text);font:600 13.5px var(--fm)}
 @media (max-width:1100px){.botgrid{grid-template-columns:1fr}}
@@ -5496,6 +6255,8 @@ dialog::backdrop{background:rgba(2,5,10,.7);backdrop-filter:blur(3px)}
 
 @media (max-width:1400px){.dashgrid,.secgrid{grid-template-columns:minmax(0,1fr) 300px}}
 @media (max-width:1250px){.dashgrid,.secgrid{grid-template-columns:1fr}.rail{position:static;max-height:none}.kpis{grid-template-columns:1fr 1fr}.clock:nth-child(n+4){display:none}}
+@media (max-width:1600px){.clock:nth-child(n+3){display:none}.top .ibtn .lbltxt{display:none}}
+@media (max-width:1250px){.clocks{display:none}}
 @media (max-width:820px){
   .statusbar .hide-sm,.clocks{display:none}
   .top{flex-wrap:wrap;gap:10px;padding:10px 12px}.search{order:5;max-width:none;flex-basis:100%;margin:0}
@@ -5538,10 +6299,10 @@ dialog::backdrop{background:rgba(2,5,10,.7);backdrop-filter:blur(3px)}
       <input id="q" type="search" placeholder="ابحث في الأخبار والدراسات والمصادر…" autocomplete="off" aria-label="بحث"><kbd>/</kbd></label>
     <span class="sp"></span>
     <div class="clocks" id="clocks" aria-label="التوقيت في عواصم العالم"></div>
+    <button class="ibtn support" id="supportbtn" title="ادعم المشروع"><svg class="i" viewBox="0 0 24 24"><path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/></svg><span>ادعم المشروع</span></button>
     <button class="ibtn primary" id="refresh"><svg class="i" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7L20 8M20 3v5h-5"/></svg><span class="lbltxt">تحديث</span></button>
     <button class="ibtn" id="cmdbtn" title="لوحة الأوامر (Ctrl+K)" aria-label="لوحة الأوامر"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg><span class="mt lbltxt" style="font-size:11px">Ctrl K</span></button>
-    <button class="ibtn" id="wallbtn" title="وضع الشاشة الكبيرة" aria-label="وضع الشاشة الكبيرة"><svg class="i" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></button>
-    <button class="ibtn bell" id="bell" data-cat="alerts" title="الإنذار المبكر" aria-label="الإنذارات"><svg class="i" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 8 3 8H3s3-1 3-8M10 20a2 2 0 0 0 4 0"/></svg><span class="n" id="belln" hidden></span></button>
+    <span id="bell" hidden><span id="belln" hidden></span></span>
     <button class="ibtn" id="tkToggle" aria-pressed="true" title="إظهار أو إخفاء الأشرطة"><svg class="i" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></svg><span class="lbltxt" id="tkTxt">الأشرطة</span></button>
     <div class="skins" role="group" aria-label="نمط التصميم">
       <button data-skin="neon" title="نيون أزرق"><i style="background:#1EA7FF;box-shadow:0 0 8px #1EA7FF"></i></button>
@@ -5648,7 +6409,6 @@ dialog::backdrop{background:rgba(2,5,10,.7);backdrop-filter:blur(3px)}
   <section id="setview" hidden>
     <div class="box lanbox" id="updbox"></div>
     <div id="setlan"></div>
-    <div class="box lanbox"><b style="font:700 14px var(--fd)">وضع الشاشة الكبيرة</b><span class="hint" style="font-size:12.5px;color:var(--muted)">عرض بملء الشاشة لغرفة عمليات أو شاشة على الحائط، يتنقل تلقائياً كل 20 ثانية بين الخريطة والأخبار النوعية والإنذارات وحالة الإنترنت. للخروج اضغط Esc.</span><div class="row"><button class="ibtn primary" id="wallgo">تشغيل وضع الشاشة الكبيرة</button></div></div>
   </section>
 
   <!-- اسأل المركز -->
@@ -5705,6 +6465,8 @@ dialog::backdrop{background:rgba(2,5,10,.7);backdrop-filter:blur(3px)}
       <div class="mappanel">
         <span class="t">الأحداث النوعية على الخريطة</span>
         <div class="seg" id="maphours"><button data-mh="6">6 ساعات</button><button data-mh="24" class="on">يوم</button><button data-mh="72">3 أيام</button><button data-mh="168">أسبوع</button></div>
+        <label class="opt" style="font-size:12.5px;white-space:nowrap">نوع الخريطة <select id="mapstyle" class="dsel" style="height:30px"><option value="general">عامة</option><option value="detailed">تفصيلية (مدن وقرى وطرق)</option><option value="satellite">قمر صناعي مع الأسماء</option><option value="terrain">تضاريس</option></select></label>
+        <div class="seg" id="mapzoom"><button data-mz="sy">سوريا</button><button data-mz="me">الشرق الأوسط</button><button data-mz="world">العالم</button></div>
         <label class="opt" style="font-size:12.5px"><input type="checkbox" id="mapdens" checked>كثافة الأخبار حسب الدولة</label>
         <div class="maplegend" id="maplegend"></div>
         <span class="mapcount" id="mapcount"></span>
@@ -5718,6 +6480,14 @@ dialog::backdrop{background:rgba(2,5,10,.7);backdrop-filter:blur(3px)}
     <div class="alertbar" id="allist"></div>
   </section>
 
+  <!-- الملخص اليومي -->
+  <section id="dailyview" hidden>
+    <div class="dailygrid">
+      <div class="box"><div class="boxh"><span>التقرير</span><span class="sp"></span><select id="dailyday" class="dsel"></select><button class="ibtn" id="dailypdf">PDF</button><button class="ibtn" id="dailysend">إرسال إلى تيليغرام</button><button class="ibtn primary" id="dailybuild">إنشاء الآن</button></div><div class="dailybody" id="dailybody"></div></div>
+      <div class="box"><div class="boxh">إعدادات الملخص</div><div class="bbody" id="dailyset"></div></div>
+    </div>
+  </section>
+
   <!-- بوت تيليغرام -->
   <section id="botview" hidden>
     <div class="botgrid">
@@ -5726,8 +6496,8 @@ dialog::backdrop{background:rgba(2,5,10,.7);backdrop-filter:blur(3px)}
         <div class="bbody" id="bform"></div>
       </div>
       <div>
-        <div class="box"><div class="boxh">حالة النشر<span class="sp"></span><button class="ibtn" id="bsendnow">أرسل مقالة الآن</button></div><div class="bstat" id="bstat"></div></div>
-        <div class="box" style="margin-top:14px"><div class="boxh">آخر ما أُرسل<span class="sp"></span><button class="lnk" id="breset" title="يسمح بإعادة إرسال المقالات السابقة">مسح السجل</button></div><ul class="warts" id="brecent"></ul></div>
+        <div class="box"><div class="boxh">حالة القنوات<span class="sp"></span><button class="ibtn" id="bsendnow">أرسل مقالة الآن</button></div><div class="bstat" id="bstat"></div></div>
+        <div class="box" style="margin-top:14px"><div class="boxh"><span id="brecenth">آخر ما أُرسل</span><span class="sp"></span><button class="lnk" id="breset" title="يسمح بإعادة إرسال المقالات السابقة">مسح السجل</button></div><ul class="warts" id="brecent"></ul></div>
       </div>
     </div>
   </section>
@@ -5826,12 +6596,10 @@ dialog::backdrop{background:rgba(2,5,10,.7);backdrop-filter:blur(3px)}
   <div class="dlgbody" id="dlgBody"></div>
 </dialog>
 <div class="toast" id="toast" role="status"></div>
-<div id="wall" hidden>
-  <div class="wtop"><span class="wbrand">مركز أبو زبيدة للتتبع والرصد</span><span class="wslide" id="wslidename"></span><span class="sp"></span><span class="wclock mt" id="wclock"></span><button class="ibtn" id="wallexit">خروج (Esc)</button></div>
-  <div class="wbody" id="wbody"><div id="wmap"></div><div id="wpanel"></div></div>
-  <div class="wallprog"><i id="wprog"></i></div>
-  <div class="wtick"><span class="lbl">آخر الأخبار</span><div class="track"><div class="run" id="wtick"></div></div></div>
-</div>
+<dialog id="supdlg" class="supdlg"><div class="suphead"><svg class="i" viewBox="0 0 24 24"><path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/></svg><b>ادعم مركز أبو زبيدة</b><button class="x" id="supclose" aria-label="إغلاق">×</button></div>
+ <p>المركز مجاني ويعمل على جهازك دون اشتراك. دعمك يساعد على استمرار تطويره وإضافة مصادر وميزات جديدة.</p>
+ <div class="supacts" id="supacts"></div>
+ <p class="supdev">تطوير أبو عبدالله الشامي</p></dialog>
 <div id="cmdk" hidden><div class="cmdbox" role="dialog" aria-label="لوحة الأوامر"><input id="cmdin" placeholder="اكتب: قسماً، دولة، مركزاً، أو كلمة للبحث…" autocomplete="off"><ul id="cmdlist"></ul><div class="cmdhint mt">↑↓ للتنقل · Enter للفتح · Esc للإغلاق</div></div></div>
 
 <script>
@@ -5842,8 +6610,9 @@ const S={cat:'dash',hours:0,source:'',tag:'',q:'',page:1,per:30,total:0,ids:new 
 const CF={q:'',region:'',cat:''};
 const TITLE_DEFAULT='مركز أبو زبيدة للتتبع والرصد';
 const DESC={
+ daily:'تقرير من صفحة واحدة عن أهم ما رصده المركز خلال آخر 24 ساعة، مقسّم حسب الأحداث النوعية والدول. يُنشأ تلقائياً كل صباح، ويمكن إرساله إلى تيليغرام أو حفظه PDF.',
  net:'حالة الاتصال بالإنترنت في دول المنطقة لحظياً. انقطاع الإنترنت كثيراً ما يسبق عملية عسكرية أو يرافقها. المصدر: مرصد IODA في معهد جورجيا للتقنية.',
- settings:'التحديث التلقائي، والفتح من الجوال، ووضع الشاشة الكبيرة.',
+ settings:'التحديث التلقائي والفتح من الجوال.',
  ask:'اسأل سؤالاً عادياً، فيجيبك المركز من الأخبار والدراسات التي رصدها، مع أرقام مصادر كل معلومة.',
  sanctions:'كل المصنَّفين إرهابياً على قائمة العقوبات الأمريكية (OFAC) وقائمة مجلس الأمن الدولي، مرتبين حسب الجماعة: داعش والقاعدة والنصرة وحزب الله والحرس الثوري وطالبان والشباب وغيرها، مع أحدث الإدراجات وبحث في القوائم كاملة.',
  cases:'اجمع الأخبار والدراسات المتعلقة بقضية تتابعها في ملف واحد، مع ملاحظاتك، وصدّرها تقريراً. كل مادة تُضاف تُؤرشف تلقائياً.',
@@ -5851,7 +6620,7 @@ const DESC={
  official:'بيانات وزارات الدفاع والخارجية والعدل والقيادات العسكرية والأمم المتحدة والناتو، وهي المصدر الأول قبل أن تعيد الصحف صياغتها.',
  map:'كل خبر نوعي على الخريطة في موقعه: المدينة إن ذُكرت، أو الدولة. اضغط أي نقطة لتقرأ الخبر.',
  alerts:'ينبّهك المركز حين يقفز الحديث عن دولة أو موضوع فجأة فوق معدله المعتاد، أو حين تتوالى الأحداث النوعية في مكان واحد.',
- bot:'يرسل البوت إلى قناتك أو مجموعتك في تيليغرام ملخص مقالة أو دراسة أو خبر عالمي مترجم مع رابطه، كل دقيقة.',
+ bot:'يرسل البوت إلى قناتك أو مجموعتك في تيليغرام ملخص مقالة أو دراسة أو خبر عالمي مترجم مع رابطه، بالسرعة والفلتر اللذين تختارهما.',
  writer:'اكتب مقالاً أو دراسة أو تقدير موقف عن أي موضوع، يُكتب كاملاً تلقائياً مستنداً إلى ما رصده المركز. يعمل مجاناً فوراً دون مفتاح، أو عبر Gemini أو Ollama أو Claude.',
  qual:'الأحداث الميدانية المهمة تُلتقط تلقائياً من كل الأخبار وقنوات تيليغرام: غارات، مسيّرات، انفجارات، اشتباكات، اعتقالات، توغلات، اغتيالات.',
  dash:'نظرة واحدة على كل الأقسام: آخر ما رصده المركز في كل قسم، ومؤشر التوتر الأمني، وآخر منشورات تيليغرام.',
@@ -5872,8 +6641,8 @@ const DESC={
  books:'كتب صدرت خلال آخر سنتين عن الإرهاب والحروب والسياسة والأمن والاستخبارات، مع غلافها وملخصها المترجم ورابطها.',
  health:'حالة كل مصدر في آخر دورة جلب. المصادر التي لا يعمل رابطها تُجلب عبر بحث أخبار Google لنفس الموقع.'
 };
-const CODES={net:'SIGINT / INTERNET',settings:'SYSTEM / SETTINGS',ask:'QUERY / ASK',sanctions:'DESIGNATIONS / SANCTIONS',cases:'CASE FILES',archive:'EVIDENCE / ARCHIVE',official:'SEC-11 / OFFICIAL',map:'GEO / LIVE-MAP',alerts:'EARLY WARNING / ALERTS',bot:'RELAY / TELEGRAM-BOT',writer:'STUDIO / WRITER',qual:'CRITICAL / EVENTS',dash:'COMMAND / OVERVIEW',all:'ALL-SOURCES',world:'SEC-01 / GLOBAL',arab:'SEC-02 / ARAB',think_global:'SEC-03 / THINK-TANKS',think_arab:'SEC-04 / ARAB-RESEARCH',terror:'SEC-05 / COUNTER-TERRORISM',war:'SEC-06 / CONFLICT',economy:'SEC-07 / ECONOMY',tweets:'SEC-08 / TELEGRAM',keywords:'SEC-09 / WATCHLIST',intel:'SEC-10 / SECURITY-INTEL',countries:'GEO / COUNTRIES',books:'LIBRARY / BOOKS',centers:'DIRECTORY / CENTERS',saved:'ARCHIVE / SAVED',health:'SYSTEM / SOURCES'};
-const EXTRA={net:'رصد انقطاع الإنترنت',settings:'الإعدادات',ask:'اسأل المركز',sanctions:'العقوبات والتصنيفات',cases:'ملفات القضايا',archive:'الأرشيف والعناوين المعدّلة',map:'الخريطة التفاعلية',alerts:'الإنذار المبكر',bot:'بوت تيليغرام',writer:'كاتب المقالات والدراسات',qual:'أخبار نوعية',dash:'لوحة القيادة',all:'كل الأخبار',countries:'الدول',books:'مكتبة الكتب',centers:'دليل المراكز',saved:'المحفوظات',health:'صحة المصادر والترجمة'};
+const CODES={daily:'DAILY / BRIEF',net:'SIGINT / INTERNET',settings:'SYSTEM / SETTINGS',ask:'QUERY / ASK',sanctions:'DESIGNATIONS / SANCTIONS',cases:'CASE FILES',archive:'EVIDENCE / ARCHIVE',official:'SEC-11 / OFFICIAL',map:'GEO / LIVE-MAP',alerts:'EARLY WARNING / ALERTS',bot:'RELAY / TELEGRAM-BOT',writer:'STUDIO / WRITER',qual:'CRITICAL / EVENTS',dash:'COMMAND / OVERVIEW',all:'ALL-SOURCES',world:'SEC-01 / GLOBAL',arab:'SEC-02 / ARAB',think_global:'SEC-03 / THINK-TANKS',think_arab:'SEC-04 / ARAB-RESEARCH',terror:'SEC-05 / COUNTER-TERRORISM',war:'SEC-06 / CONFLICT',economy:'SEC-07 / ECONOMY',tweets:'SEC-08 / TELEGRAM',keywords:'SEC-09 / WATCHLIST',intel:'SEC-10 / SECURITY-INTEL',countries:'GEO / COUNTRIES',books:'LIBRARY / BOOKS',centers:'DIRECTORY / CENTERS',saved:'ARCHIVE / SAVED',health:'SYSTEM / SOURCES'};
+const EXTRA={daily:'الملخص اليومي',net:'رصد انقطاع الإنترنت',settings:'الإعدادات',ask:'اسأل المركز',sanctions:'العقوبات والتصنيفات',cases:'ملفات القضايا',archive:'الأرشيف والعناوين المعدّلة',map:'الخريطة التفاعلية',alerts:'الإنذار المبكر',bot:'بوت تيليغرام',writer:'كاتب المقالات والدراسات',qual:'أخبار نوعية',dash:'لوحة القيادة',all:'كل الأخبار',countries:'الدول',books:'مكتبة الكتب',centers:'دليل المراكز',saved:'المحفوظات',health:'صحة المصادر والترجمة'};
 const P={
  radar:'<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><path d="M12 12l6.4-6.4"/>',
  grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
@@ -5909,7 +6678,7 @@ const P={
  pdf:'<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M9 13h6M9 16h4"/>',
  swap:'<path d="M7 7h12l-3-3M17 17H5l3 3"/>'
 };
-const CICON={net:'wifi',settings:'gear',ask:'search',sanctions:'shield',cases:'centers',archive:'bookmark',official:'columns',map:'globe',alerts:'bell',bot:'send',writer:'pen',qual:'bolt',dash:'radar',all:'grid',world:'globe',arab:'news',think_global:'columns',think_arab:'building',terror:'shield',war:'target',economy:'chart',tweets:'send',keywords:'search',intel:'lock',countries:'flag',country:'flag',books:'book',centers:'centers',saved:'bookmark',health:'pulse'};
+const CICON={daily:'pdf',net:'wifi',settings:'gear',ask:'search',sanctions:'shield',cases:'centers',archive:'bookmark',official:'columns',map:'globe',alerts:'bell',bot:'send',writer:'pen',qual:'bolt',dash:'radar',all:'grid',world:'globe',arab:'news',think_global:'columns',think_arab:'building',terror:'shield',war:'target',economy:'chart',tweets:'send',keywords:'search',intel:'lock',countries:'flag',country:'flag',books:'book',centers:'centers',saved:'bookmark',health:'pulse'};
 const ico=(n)=>`<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${P[n]||''}</svg>`;
 
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -5918,7 +6687,7 @@ function hm(ts){return new Date(ts*1000).toLocaleTimeString('en-GB',{hour:'2-dig
 function dm(ts){const d=new Date(ts*1000);return d.toLocaleDateString('ar',{day:'numeric',month:'short'})}
 function fmt(ts){return ts?new Date(ts*1000).toLocaleString('ar',{dateStyle:'medium',timeStyle:'short'}):'—'}
 async function api(u,o){const r=await fetch(u,o);const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
-function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('show');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('show'),2300)}
+function toast(t){}          /* الإشعارات المنبثقة ملغاة */
 function lsGet(k,d){try{return localStorage.getItem(k)??d}catch(e){return d}}
 function lsSet(k,v){try{localStorage.setItem(k,v)}catch(e){}}
 function savedList(){try{return JSON.parse(lsGet('rased_saved','[]'))}catch(e){return[]}}
@@ -6003,10 +6772,10 @@ function navi(key,name,color,count,ratio){return `<button class="navi${S.cat===k
 function renderNav(){
  const sum=META.categories.reduce((a,c)=>a+c.day,0);
  const max=Math.max(1,...META.categories.map(c=>c.day));
- let h='<div class="navgrp">COMMAND</div>'+navi('dash','لوحة القيادة','var(--acc)','')+navi('qual','أخبار نوعية','var(--red)',QSTATS?QSTATS.total:'')+navi('alerts','الإنذار المبكر','#F59E0B',ALN||'')+navi('map','الخريطة التفاعلية','var(--acc)','')+navi('net','انقطاع الإنترنت','#A78BFA',NETBAD||'')+navi('ask','اسأل المركز','var(--acc)','')+navi('all','كل الأخبار','var(--acc)',sum);
+ let h='<div class="navgrp">COMMAND</div>'+navi('dash','لوحة القيادة','var(--acc)','')+navi('daily','الملخص اليومي','var(--gold)','')+navi('qual','أخبار نوعية','var(--red)',QSTATS?QSTATS.total:'')+navi('alerts','الإنذار المبكر','#F59E0B','')+navi('map','الخريطة التفاعلية','var(--acc)','')+navi('net','انقطاع الإنترنت','#A78BFA',NETBAD||'')+navi('ask','اسأل المركز','var(--acc)','')+navi('all','كل الأخبار','var(--acc)',sum);
  h+='<div class="navgrp">SECTIONS / الأقسام</div>';
  META.categories.forEach(c=>h+=navi(c.key,c.name,c.color,c.day,c.key==='tweets'||c.key==='keywords'?null:c.day/max));
- h+='<div class="navgrp">TOOLS / الأدوات</div>'+navi('centers','دليل المراكز','var(--acc)',CENTERS.length||'')+navi('countries','الدول','var(--acc)',CTY.length||'')+navi('books','مكتبة الكتب','var(--gold)',BOOKS_N||'')+navi('writer','كاتب المقالات','var(--acc)','')+navi('bot','بوت تيليغرام','#38BDF8',BOTON?'يعمل':'')+navi('sanctions','العقوبات والتصنيفات','#E11D48',META.sanc_new||'')+navi('cases','ملفات القضايا','var(--gold)','')+navi('archive','الأرشيف','var(--acc)','')+navi('saved','المحفوظات','var(--gold)',savedList().length||'')+navi('settings','الإعدادات','var(--muted)','')+navi('health','صحة المصادر والترجمة',META.health.fail||META.tr_stats.down?'var(--red)':'var(--green)',META.health.fail?META.health.fail+' متعطل':'');
+ h+='<div class="navgrp">TOOLS / الأدوات</div>'+navi('centers','دليل المراكز','var(--acc)',CENTERS.length||'')+navi('countries','الدول','var(--acc)',CTY.length||'')+navi('books','مكتبة الكتب','var(--gold)',BOOKS_N||'')+navi('writer','كاتب المقالات','var(--acc)','')+(S.cat==='bot'?navi('bot','بوت تيليغرام','#38BDF8',BOTON?'يعمل':''):'')+navi('sanctions','العقوبات والتصنيفات','#E11D48',META.sanc_new||'')+navi('cases','ملفات القضايا','var(--gold)','')+navi('archive','الأرشيف','var(--acc)','')+navi('saved','المحفوظات','var(--gold)',savedList().length||'')+navi('settings','الإعدادات','var(--muted)','')+navi('health','صحة المصادر والترجمة',META.health.fail||META.tr_stats.down?'var(--red)':'var(--green)',META.health.fail?META.health.fail+' متعطل':'');
  $('#nav').innerHTML=h;
  $('#sidefoot').innerHTML=`SOURCES <b>${META.health.ok}/${META.health.ok+META.health.fail}</b><br>TRANSLATION QUEUE <b>${META.pending}</b><br>LAST CYCLE <b>${META.state.last_cycle?ago(META.state.last_cycle):'…'}</b>`}
 function renderTags(){const h=META.tags.length?META.tags.map(t=>`<button class="tag${S.tag===t.tag?' on':''}" data-tag="${esc(t.tag)}">${esc(t.tag)} <em>${t.count}</em></button>`).join(''):'<span class="count">تظهر بعد ترجمة العناصر.</span>';$('#tags').innerHTML=h;$('#dashTags').innerHTML=h}
@@ -6040,12 +6809,12 @@ function setView(cat){
  S.cat=cat;S.source='';S.tag='';S.page=1;if(cat!=='center')S.center='';if(cat!=='country')S.country='';
  $('#title').textContent=EXTRA[cat]||CAT[cat]?.name||'';
  $('#desc').textContent=DESC[cat]||'';$('#pcode').textContent=CODES[cat]||'';
- const feedViews=!['dash','tweets','centers','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','net','settings'].includes(cat);
+ const feedViews=!['dash','tweets','centers','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','net','settings','daily'].includes(cat);
  $('#mapview').hidden=cat!=='map';$('#alertsview').hidden=cat!=='alerts';
  $('#netview').hidden=cat!=='net';$('#setview').hidden=cat!=='settings';
  $('#askview').hidden=cat!=='ask';$('#sancview').hidden=cat!=='sanctions';$('#casesview').hidden=cat!=='cases';$('#archview').hidden=cat!=='archive';
  $('#writerview').hidden=cat!=='writer';
- $('#botview').hidden=cat!=='bot';
+ $('#botview').hidden=cat!=='bot';$('#dailyview').hidden=cat!=='daily';
  $('#pagehead').hidden=cat==='center'||cat==='country';
  $('#centerhead').hidden=cat!=='center';
  $('#countryhead').hidden=cat!=='country';
@@ -6070,7 +6839,8 @@ function setView(cat){
  if(cat==='books')return loadBooks();
  if(cat==='writer')return loadWriter();
  if(cat==='bot')return loadBot();
- if(cat==='map')return loadMap();
+ if(cat==='daily')return loadDaily();
+ if(cat==='map'){$('#mapstyle').value=MAPSTYLE;return loadMap()}
  if(cat==='ask')return initAsk();
  if(cat==='sanctions')return loadSanc();
  if(cat==='cases')return loadCases();
@@ -6193,14 +6963,16 @@ let CTY=[];const CTYF={q:'',region:''};let BOOKS_N=0;
 async function loadCty(){const d=await api('/api/countries');CTY=d.items;return CTY}
 function renderDashCty(){
  const top=CTY.slice().sort((a,b)=>b.day-a.day||b.count-a.count).slice(0,10);const max=Math.max(1,...top.map(c=>c.day||c.count));
- $('#dashCty').innerHTML=top.length?top.map(c=>`<li><button data-country="${esc(c.name)}"><span class="iso">${esc(c.iso)}</span><span>${esc(c.name)}</span><span class="n">${c.day}</span><span class="cbar"><i style="width:${Math.round((c.day||c.count)/max*100)}%"></i></span></button></li>`).join(''):'<li class="count" style="padding:12px 14px">تظهر بعد ترجمة المواد.</li>'}
+ $('#dashCty').innerHTML=top.length?top.map(c=>`<li><button data-country="${esc(c.name)}">${flagHtml(c.iso)}<span>${esc(c.name)}</span><span class="n">${c.day}</span><span class="cbar"><i style="width:${Math.round((c.day||c.count)/max*100)}%"></i></span></button></li>`).join(''):'<li class="count" style="padding:12px 14px">تظهر بعد ترجمة المواد.</li>'}
 async function renderCountries(){
  $('#ctygrid').innerHTML='<div class="loading spinner">جارٍ تحميل الدول…</div>';
  try{await loadCty()}catch(e){$('#ctygrid').innerHTML='<div class="empty"><b>تعذّر التحميل</b></div>';return}
  const regs=['',...new Set(CTY.map(c=>c.region).filter(Boolean))];
  $('#ctyregion').innerHTML=regs.map(r=>`<button data-ctyregion="${esc(r)}" class="${CTYF.region===r?'on':''}">${esc(r||'كل المناطق')}</button>`).join('');
  renderCtyGrid()}
-function ctyCard(c,max){return `<button class="ctycard" data-country="${esc(c.name)}"><span class="top2"><span class="iso">${esc(c.iso)}</span><b>${esc(c.name)}</b></span><span class="nums"><span><em>${c.count}</em>مادة في الشهر</span><span><em>${c.day}</em>اليوم</span></span><span class="cbar"><i style="width:${Math.round(c.count/max*100)}%"></i></span></button>`}
+function flagHtml(iso,cls){iso=(iso||'').trim();if(!/^[A-Za-z]{2}$/.test(iso))return `<span class="iso ${cls||''}">${esc(iso||'—')}</span>`;
+ return `<span class="iso flag ${cls||''}" title="${esc(iso)}"><img src="/flag/${iso.toLowerCase()}" alt="${esc(iso)}" loading="lazy" onerror="this.parentNode.classList.remove('flag');this.replaceWith(this.alt)"></span>`}
+function ctyCard(c,max){return `<button class="ctycard" data-country="${esc(c.name)}"><span class="top2">${flagHtml(c.iso)}<b>${esc(c.name)}</b></span><span class="nums"><span><em>${c.count}</em>مادة في الشهر</span><span><em>${c.day}</em>اليوم</span></span><span class="cbar"><i style="width:${Math.round(c.count/max*100)}%"></i></span></button>`}
 function renderCtyGrid(){
  const l=CTY.filter(c=>(!CTYF.region||c.region===CTYF.region)&&(!CTYF.q||c.name.includes(CTYF.q)||c.iso.toLowerCase()===CTYF.q.toLowerCase()));
  $('#ctycount').textContent=l.length+' دولة';
@@ -6215,7 +6987,7 @@ async function renderCountryHead(){
  $('#countryhead').innerHTML=`<button class="back" data-cat="countries">${ico('arrow')}كل الدول</button><div class="box chero"><span class="spinner">…</span></div>`;
  try{const d=await api('/api/country/'+encodeURIComponent(name));if(S.country!==name)return;
   $('#countryhead').innerHTML=`<button class="back" data-cat="countries">${ico('arrow')}كل الدول</button>
-  <div class="box chero" style="--c:var(--acc)"><span class="iso big">${esc(d.iso||'—')}</span>
+  <div class="box chero" style="--c:var(--acc)">${flagHtml(d.iso,'big')}
    <div class="grow"><h1>${esc(name)}</h1><div class="cmeta">${d.region?`<span class="pill">${esc(d.region)}</span>`:''}${d.cats.slice(0,4).map(c=>`<span>${esc(CAT[c.cat]?.name||c.cat)}: ${c.count}</span>`).join('')}</div></div>
    <div class="num"><b>${d.count}</b><span>مادة خلال الشهر</span></div></div>
   ${d.tags.length?`<div class="box ctopics"><div class="tags" style="padding:0"><span class="clbl">مواضيع مرتبطة:</span>
@@ -6232,7 +7004,7 @@ function alertHtml(a,now_){const tl=a.kind==='field'?'تصاعد ميداني':(
  const btn=a.kind==='topic'?`<button class="ibtn" data-altopic="${esc(a.key)}">عرض الأخبار</button>`:`<button class="ibtn" data-alcountry="${esc(a.key)}">عرض ${esc(a.key)}</button>`;
  return `<div class="al" style="--lc:${LVC[a.level]||LVC[2]}"><span class="lv">${a.level>=3?'إنذار عالٍ':'إنذار'}</span><div><b>${esc(a.msg)}</b><small>${tl} · ${ago(a.created)}</small></div><div class="acts2">${btn}${a.kind!=='topic'?`<button class="ibtn" data-cat="map">الخريطة</button>`:''}</div></div>`}
 async function loadAlertCount(){try{const d=await api('/api/alerts?hours=24');const fresh=d.items.filter(a=>a.created>ALSEEN);ALN=fresh.length;
- const b=$('#belln');b.hidden=!ALN;b.textContent=ALN;$('#bell').classList.toggle('hot',fresh.some(a=>a.level>=3));
+ const b=$('#belln');b.hidden=true;
  const act=d.items.filter(a=>d.now-a.created<6*3600).slice(0,3);
  $('#dashAlerts').innerHTML=act.map(a=>alertHtml(a,d.now)).join('');return d}catch(e){}}
 async function loadAlerts(){
@@ -6250,11 +7022,21 @@ const TILES=[
  {url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png',attr:'&copy; OpenStreetMap',dark:'invert'},
  {url:'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',attr:'&copy; Esri',dark:'native',light:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}'},
  {url:'https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png',attr:'&copy; OpenStreetMap France',dark:'invert'}];
-let TIDX=0,TERR=0,TOK=0;
-function tileUrl(){const t=TILES[TIDX];const light=document.documentElement.dataset.theme==='light';return (light&&t.light)?t.light:t.url}
+let TIDX=0,TERR=0,TOK=0,LBL=null;
+let MAPSTYLE=lsGet('rased_mapstyle','general');
+const MSTYLES={detailed:{url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png',attr:'&copy; OpenStreetMap',max:19},
+ satellite:{url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',attr:'&copy; Esri',max:19,labels:'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'},
+ terrain:{url:'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',attr:'&copy; OpenTopoMap',max:17}};
+const MZOOM={sy:[[35.0,38.6],7],me:[[30,40],5],world:[[25,20],2]};
+function applyMapStyle(){if(!MAP||!TILE)return;const st=MSTYLES[MAPSTYLE];
+ TILE.options.maxZoom=st?st.max:18;MAP.setMaxZoom(st?st.max:18);TILE.options.attribution=st?st.attr:TILES[TIDX].attr;TILE.setUrl(tileUrl());tileFilter();
+ if(LBL){MAP.removeLayer(LBL);LBL=null}
+ if(st&&st.labels){LBL=L.tileLayer(st.labels,{maxZoom:st.max,pane:'overlayPane',opacity:.95}).addTo(MAP)}
+ if(MAP.attributionControl){MAP.attributionControl.removeAttribution(TILES[TIDX].attr);Object.values(MSTYLES).forEach(x=>MAP.attributionControl.removeAttribution(x.attr));MAP.attributionControl.addAttribution(st?st.attr:TILES[TIDX].attr)}}
+function tileUrl(){if(MSTYLES[MAPSTYLE])return MSTYLES[MAPSTYLE].url;const t=TILES[TIDX];const light=document.documentElement.dataset.theme==='light';return (light&&t.light)?t.light:t.url}
 function tileFilter(){const t=TILES[TIDX];const light=document.documentElement.dataset.theme==='light';
- $('#map').classList.toggle('mapdark',!light&&t.dark==='invert')}
-function nextTiles(){if(TIDX>=TILES.length-1)return;TIDX++;TERR=0;TOK=0;TILE.setUrl(tileUrl());TILE.options.attribution=TILES[TIDX].attr;tileFilter()}
+ $('#map').classList.toggle('mapdark',MAPSTYLE==='general'&&!light&&t.dark==='invert')}
+function nextTiles(){if(MAPSTYLE!=='general'||TIDX>=TILES.length-1)return;TIDX++;TERR=0;TOK=0;TILE.setUrl(tileUrl());TILE.options.attribution=TILES[TIDX].attr;tileFilter()}
 let TILE=null;
 async function loadMap(refresh){
  try{await loadLeaflet()}catch(e){$('#map').innerHTML='<div class="mapnote">تعذّر تحميل مكتبة الخرائط. تأكد من اتصال الإنترنت ثم أعد فتح الصفحة.</div>';return}
@@ -6262,7 +7044,7 @@ async function loadMap(refresh){
   TILE=L.tileLayer(tileUrl(),{maxZoom:18,attribution:TILES[TIDX].attr,crossOrigin:true}).addTo(MAP);
   TILE.on('tileload',()=>{TOK++});
   TILE.on('tileerror',()=>{TERR++;if(TERR>=6&&TOK<3)nextTiles()});
-  MLAYER=L.layerGroup().addTo(MAP);DLAYER=L.layerGroup().addTo(MAP);}
+  MLAYER=L.layerGroup().addTo(MAP);DLAYER=L.layerGroup().addTo(MAP);$('#mapstyle').value=MAPSTYLE;applyMapStyle();}
  TILE.setUrl(tileUrl());tileFilter();setTimeout(()=>MAP.invalidateSize(),60);
  let d;try{d=await api('/api/map?hours='+MAPH)}catch(e){return}
  MLAYER.clearLayers();DLAYER.clearLayers();
@@ -6277,7 +7059,9 @@ async function loadMap(refresh){
   m.addTo(MLAYER)});
  $('#maplegend').innerHTML=(QSTATS?QSTATS.types:[]).filter(t=>counts[t.name]).map(t=>`<label><input type="checkbox" data-mev="${esc(t.name)}"${MAPOFF.has(t.name)?'':' checked'}><i style="--e:${t.color}"></i>${esc(t.name)}<em>${counts[t.name]}</em></label>`).join('')||'<span class="mapcount">لا أحداث نوعية في هذه المدة.</span>';
  $('#mapcount').textContent=d.points.length+' حدثاً على الخريطة'}
-document.addEventListener('change',e=>{if(e.target.id==='mapdens')return loadMap();if(e.target.dataset.mev){e.target.checked?MAPOFF.delete(e.target.dataset.mev):MAPOFF.add(e.target.dataset.mev);loadMap()}});
+document.addEventListener('change',e=>{if(e.target.id==='mapstyle'){MAPSTYLE=e.target.value;lsSet('rased_mapstyle',MAPSTYLE);applyMapStyle();if(MAPSTYLE!=='general'&&MAP.getZoom()<6&&MAP.getBounds().contains([35,38.6]))MAP.setView(MZOOM.sy[0],MZOOM.sy[1]);return}if(e.target.id==='mapdens')return loadMap();if(e.target.dataset.mev){e.target.checked?MAPOFF.delete(e.target.dataset.mev):MAPOFF.add(e.target.dataset.mev);loadMap()}});
+
+document.addEventListener('click',e=>{const b=e.target.closest('[data-mz]');if(!b||!MAP)return;const z=MZOOM[b.dataset.mz];MAP.flyTo(z[0],z[1],{duration:.8})});
 
 /* اسأل المركز */
 let ASKTXT='',ASKREFS=[];
@@ -6387,38 +7171,10 @@ async function loadUpdBox(){try{const d=await api('/api/update');const c=d.cfg,s
  $('#updbox').innerHTML=`<b style="font:700 14px var(--fd)">التحديث التلقائي من GitHub</b>
   <span style="font-size:13px">الإصدار الحالي: <b class="mt">${esc(d.version)}</b>${st.remote_version?` · على GitHub: <b class="mt">${esc(st.remote_version)}</b>`:''}${st.last?` · آخر فحص ${ago(st.last)}`:''}</span>
   ${st.state?`<span style="font-size:13px" class="${st.ready?'ok':''}">${esc(st.state)}</span>`:''}${st.error?`<span class="warn" style="font-size:12.5px">${esc(st.error)}</span>`:''}
-  <div class="row"><span style="font-size:13px">المستودع:</span><input id="updrepo" value="${esc(c.repo)}" dir="ltr" style="flex:1;min-width:220px;height:34px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);padding:0 10px;color:var(--text)"><input id="updbranch" value="${esc(c.branch)}" dir="ltr" style="width:90px;height:34px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);padding:0 10px;color:var(--text)"><button class="ibtn" id="updsave">حفظ</button></div>
   <label class="opt"><input type="checkbox" id="updauto"${c.auto?' checked':''}>فحص التحديثات تلقائياً كل 3 ساعات وعند التشغيل</label>
   <div class="row"><button class="ibtn primary" id="updcheck">تحقق من التحديث الآن</button>${st.ready?'<button class="ibtn" id="updgo2">إعادة التشغيل لتطبيقه</button>':''}</div>`}catch(e){}}
-function updBanner(){const u=META?.update;if(u&&u.ready&&!sessionStorage.getItem('upd_later')){$('#updtxt').textContent=`🔄 نُزِّل تحديث جديد للمركز${u.version?' (الإصدار '+u.version+')':''}. أعد التشغيل لتطبيقه.`;$('#updbar').hidden=false}else $('#updbar').hidden=true}
+function updBanner(){$('#updbar').hidden=true}          /* لا شريط إشعار بالتحديث: يُطبَّق عند التشغيل التالي */
 document.addEventListener('change',e=>{if(e.target.id==='updauto')api('/api/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auto:e.target.checked})}).then(()=>toast('حُفظ'))});
-
-/* وضع الشاشة الكبيرة */
-let WALL={i:0,map:null,layer:null},WSLIDES=['الخريطة الحية','الأحداث النوعية','الإنذارات وحالة الإنترنت','الدول الأكثر حضوراً'];
-async function wallStart(){$('#wall').hidden=false;try{await document.documentElement.requestFullscreen()}catch(e){}WALL.i=0;wallClock();WALL.ct=setInterval(wallClock,1000);wallTicker();wallShow()}
-function wallStop(){$('#wall').hidden=true;clearInterval(WALL.ct);clearTimeout(WALL.to);if(document.fullscreenElement)document.exitFullscreen().catch(()=>{})}
-function wallClock(){const n=new Date();$('#wclock').textContent=n.toLocaleTimeString('en-GB')}
-async function wallTicker(){try{const d=await api('/api/items?'+new URLSearchParams({cat:'all',per:25}));$('#wtick').innerHTML=d.items.map(i=>`<span>${esc(i.title_ar||i.title)} — ${esc(i.source_ar)}</span>`).join('');$('#wtick').style.animationDuration=Math.max(120,d.items.length*9)+'s'}catch(e){}}
-async function wallShow(){
- if($('#wall').hidden)return;
- const k=WALL.i%WSLIDES.length;$('#wslidename').textContent=WSLIDES[k];
- const bar=$('#wprog');bar.className='';void bar.offsetWidth;bar.className='run';
- $('#wmap').style.visibility=k===0?'visible':'hidden';$('#wpanel').style.display=k===0?'none':'block';
- try{
-  if(k===0){await loadLeaflet();if(!WALL.map){WALL.map=L.map('wmap',{zoomControl:false,attributionControl:false}).setView([31,40],5);WALL.tile=L.tileLayer(tileUrl(),{maxZoom:18,crossOrigin:true}).addTo(WALL.map);WALL.layer=L.layerGroup().addTo(WALL.map)}
-   $('#wmap').classList.toggle('mapdark',document.documentElement.dataset.theme!=='light'&&TILES[TIDX].dark==='invert');setTimeout(()=>WALL.map.invalidateSize(),80);
-   const d=await api('/api/map?hours=24');WALL.layer.clearLayers();
-   d.points.forEach(p=>L.circleMarker([p.lat,p.lon],{radius:p.exact?11:8,color:'#fff',weight:1.5,fillColor:p.color,fillOpacity:.9}).bindTooltip(`${p.events[0]}: ${p.title}`,{permanent:false}).addTo(WALL.layer));
-   (d.net||[]).forEach(n=>L.circleMarker([n.lat,n.lon],{radius:22,color:'#A855F7',weight:2,dashArray:'5 5',fillOpacity:.1}).addTo(WALL.layer))}
-  if(k===1){const d=await api('/api/items?'+new URLSearchParams({cat:'all',qual:'1',hours:24,per:6}));
-   $('#wpanel').innerHTML=`<div class="wgrid2">${d.items.map(i=>{const e1=(i.events||'').split('|').filter(Boolean)[0];return `<div class="wcard" style="--e:${EVC[e1]||'var(--red)'}"><div class="meta">${evHtml(i.events)}${vfHtml(i)}<span>${hm(i.published)}</span></div><h3>${esc(i.title_ar||i.title)}</h3><div class="meta"><span>${esc(i.source_ar)}</span>${(i.countries||'').split('|').filter(Boolean).slice(0,2).map(c=>`<span>${esc(c)}</span>`).join('')}</div></div>`}).join('')||'<div class="wbig">لا أحداث نوعية خلال 24 ساعة</div>'}</div>`}
-  if(k===2){const [al,nt]=await Promise.all([api('/api/alerts?hours=24'),api('/api/net')]);
-   $('#wpanel').innerHTML=`<div class="wcols"><div class="wlist"><div class="wbig">الإنذارات المبكرة</div>${al.items.slice(0,6).map(a=>alertHtml(a,al.now)).join('')||'<div class="meta">لا إنذارات خلال 24 ساعة</div>'}</div><div><div class="wbig">حالة الإنترنت</div><div class="netgrid">${nt.countries.slice(0,12).map(c=>`<div class="box netc" style="--nc:${NLV[c.level][0]}"><b>${esc(c.name)}</b><span class="st">${NLV[c.level][1]}</span></div>`).join('')}</div></div></div>`}
-  if(k===3){await loadCty();const top=CTY.slice().sort((a,b)=>b.day-a.day).slice(0,12);const mx=Math.max(1,...top.map(c=>c.day));
-   $('#wpanel').innerHTML=`<div class="wbig">الدول الأكثر حضوراً اليوم</div><div class="netgrid" style="grid-template-columns:repeat(3,1fr)">${top.map(c=>`<div class="box netc" style="--nc:var(--acc)"><b style="font-size:20px">${esc(c.name)}</b><span class="st">${c.day} خبراً اليوم</span><div class="cbar"><i style="width:${Math.round(c.day/mx*100)}%"></i></div></div>`).join('')}</div>`}
- }catch(e){}
- WALL.i++;clearTimeout(WALL.to);WALL.to=setTimeout(wallShow,20000)}
-document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement&&!$('#wall').hidden){}});
 
 /* لوحة الأوامر */
 let CMDI=[],CMDS=0;
@@ -6426,14 +7182,13 @@ function cmdOpen(){$('#cmdk').hidden=false;$('#cmdin').value='';cmdFill('');setT
 function cmdClose(){$('#cmdk').hidden=true}
 function nrm(t){return (t||'').replace(/[أإآ]/g,'ا').replace(/ى/g,'ي').replace(/ة/g,'ه').toLowerCase()}
 function cmdFill(qq){const n=nrm(qq.trim());const out=[];
- const views=Object.keys(CICON).filter(k=>EXTRA[k]||CAT[k]).map(k=>({ic:CICON[k],t:EXTRA[k]||CAT[k].name,k:'قسم',run:()=>setView(k)}));
+ const views=Object.keys(CICON).filter(k=>k!=='bot'&&(EXTRA[k]||CAT[k])).map(k=>({ic:CICON[k],t:EXTRA[k]||CAT[k].name,k:'قسم',run:()=>setView(k)}));
  const ctys=CTY.map(c=>({ic:'flag',t:c.name,k:'دولة',run:()=>openCountry(c.name)}));
  const ctrs=CENTERS.map(c=>({ic:'centers',t:c.name,k:'مركز',run:()=>openCenter(c.name)}));
  const pool=n?[...views,...ctys,...ctrs].filter(o=>nrm(o.t).includes(n)):views;
  out.push(...pool.slice(0,9));
  if(n){out.push({ic:'search',t:`ابحث في الأخبار عن: ${qq.trim()}`,k:'بحث',run:()=>{$('#q').value=qq.trim();S.q=qq.trim();setView('all')}});
   out.push({ic:'search',t:`اسأل المركز: ${qq.trim()}`,k:'سؤال',run:()=>{setView('ask');$('#askq').value=qq.trim();askGo()}});}
- out.push({ic:'screen',t:'وضع الشاشة الكبيرة',k:'أمر',run:wallStart});
  CMDI=out;CMDS=0;cmdDraw()}
 function cmdDraw(){$('#cmdlist').innerHTML=CMDI.map((o,i)=>`<li class="${i===CMDS?'on':''}" data-cmdi="${i}">${ico(o.ic)}<span>${esc(o.t)}</span><span class="k">${esc(o.k)}</span></li>`).join('');
  const el=$('#cmdlist .on');el&&el.scrollIntoView({block:'nearest'})}
@@ -6442,59 +7197,145 @@ $('#cmdin').addEventListener('input',e=>cmdFill(e.target.value));
 $('#cmdin').addEventListener('keydown',e=>{if(e.key==='ArrowDown'){e.preventDefault();CMDS=Math.min(CMDI.length-1,CMDS+1);cmdDraw()}else if(e.key==='ArrowUp'){e.preventDefault();CMDS=Math.max(0,CMDS-1);cmdDraw()}else if(e.key==='Enter'){e.preventDefault();cmdRun(CMDS)}else if(e.key==='Escape'){cmdClose()}});
 $('#cmdlist').addEventListener('click',e=>{const li=e.target.closest('[data-cmdi]');if(li)cmdRun(+li.dataset.cmdi)});
 $('#cmdk').addEventListener('click',e=>{if(e.target.id==='cmdk')cmdClose()});
-document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&(e.key==='k'||e.key==='K'||e.code==='KeyK')){e.preventDefault();$('#cmdk').hidden?cmdOpen():cmdClose()}
- else if(e.key==='Escape'&&!$('#wall').hidden)wallStop()});
+document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&(e.key==='k'||e.key==='K'||e.code==='KeyK')){e.preventDefault();$('#cmdk').hidden?cmdOpen():cmdClose()}});
 
 /* بوت تيليغرام */
-let BOTD=null,BOTON=false;
-function bpost(body,msg){return api('/api/bot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(()=>{if(msg)toast(msg);return loadBot()}).catch(e=>{toast(e.message);loadBot()})}
+let BOTD=null,BOTON=false,BOTCH=null;
+function bpost(body,msg){return api('/api/bot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(()=>{if(msg)toast(msg);return loadBot()}).catch(e=>{alert(e.message);loadBot()})}
+function bch(body,msg){return bpost({...body,ch:BOTCH},msg)}
+function bpostJ(url,body){return api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})})}
 async function loadBot(statusOnly){
  try{BOTD=await api('/api/bot')}catch(e){return}
  const c=BOTD.cfg,st=BOTD.state;BOTON=c.enabled;
- const left=Math.max(0,st.next_due-st.now);
- $('#bstat').innerHTML=`الحالة: <b class="${c.enabled?'ok':''}">${c.enabled?'يعمل':'متوقف'}</b>${st.bot_name?` (@${esc(st.bot_name)})`:''}<br>
-  أُرسل اليوم: <b>${st.sent_today}</b> مقالة<br>
-  آخر إرسال: <b>${st.last_sent?ago(st.last_sent):'—'}</b><br>
-  ${c.enabled?`الإرسال القادم: <b>${left?'بعد '+left+' ثانية':'الآن'}</b><br>`:''}
-  ${st.last_error?`<span class="warn">آخر خطأ: ${esc(st.last_error)}</span>`:''}
+ if(!BOTCH||!BOTD.channels.some(x=>x.id===BOTCH))BOTCH=BOTD.channels[0].id;
+ const ch=BOTD.channels.find(x=>x.id===BOTCH);
+ const left=Math.max(0,(ch.next_due||0)-st.now);
+ const nxt=left?(left>=120?'بعد '+Math.round(left/60)+' دقيقة':'بعد '+left+' ثانية'):'الآن';
+ $('#bstat').innerHTML=`البوت: <b class="${c.enabled?'ok':''}">${c.enabled?'يعمل':'متوقف'}</b>${st.bot_name?` (@${esc(st.bot_name)})`:''} · أُرسل اليوم من كل القنوات: <b>${st.sent_today}</b>
+  <div class="chsum">${BOTD.channels.map(x=>`<button class="${x.id===BOTCH?'on':''}" data-chsel="${esc(x.id)}"><i class="${x.on&&x.chat&&c.enabled?(x.hold||x.error?'w':'g'):''}"></i><b>${esc(x.name)}</b><span>${x.sent_today}${+x.max_day?'/'+x.max_day:''} اليوم</span></button>`).join('')}</div>
+  <div class="chst"><b>${esc(ch.name)}</b><br>
+  ${!ch.chat?'<span class="warn">لم يُحدد معرّف القناة بعد</span><br>':''}
+  ${!ch.on?'<span class="warn">هذه القناة موقوفة</span><br>':''}
+  ${ch.hold?`<span class="warn">متوقف مؤقتاً: ${esc(ch.hold)}</span><br>`:''}
+  ${c.enabled&&ch.on&&ch.chat&&!ch.hold?`الإرسال القادم: <b>${nxt}</b><br>`:''}
+  ${(ch.inc||[]).length?`الفلتر: <b>${ch.inc.length}</b> شرط${(ch.exc||[]).length?'، '+ch.exc.length+' مستبعدة':''}<br>`:''}
+  ${ch.photo?'يرسل صورة المقال مع الخبر<br>':''}
+  ${ch.error?`<span class="warn">آخر خطأ: ${esc(ch.error)}</span>`:''}</div>
   <div class="hint" style="margin-top:6px;color:var(--faint);font-size:12px">يعمل البوت ما دام البرنامج مفتوحاً على جهازك.</div>`;
- $('#brecent').innerHTML=BOTD.recent.length?BOTD.recent.map(r=>`<li><button class="t" data-open="${r.id}">${esc(r.title||'')}<span class="wstat" style="display:block">${fmt(r.sent)}</span></button></li>`).join(''):'<li class="count" style="padding:12px 14px">لم يُرسل شيء بعد.</li>';
- if(statusOnly&&$('#bform').innerHTML)return;
- const ck=(k,label,sub)=>`<label class="opt"><input type="checkbox" data-bopt="${k}"${c[k]?' checked':''}><span>${label}${sub?`<small>${sub}</small>`:''}</span></label>`;
+ $('#brecent').innerHTML=ch.recent.length?ch.recent.map(r=>`<li><button class="t" data-open="${r.id}">${esc(r.title||'')}<span class="wstat" style="display:block">${fmt(r.sent)}</span></button></li>`).join(''):'<li class="count" style="padding:12px 14px">لم يُرسل شيء إلى هذه القناة بعد.</li>';
+ $('#brecenth').textContent='آخر ما أُرسل إلى: '+ch.name;
+ const cmdH=`<div class="cmdbox2"><div class="bigtoggle"><span><b>أوامر البوت</b><br><span class="hint">اسأل البوت من تيليغرام وأنت بعيد عن الكمبيوتر</span></span><label class="sw"><input type="checkbox" id="cmdon"${c.cmd_on?' checked':''}><span></span></label></div>
+  ${c.cmd_on?`${st.cmd_error?`<span class="warn">${esc(st.cmd_error)}</span>`:`<span class="hint ok">يستمع للأوامر${st.cmd_last?' · آخر أمر '+ago(st.cmd_last):''}</span>`}
+  <div class="row"><label class="opt"><input type="radio" name="cmdmode" value="allow"${c.cmd_mode!=='all'?' checked':''}>المسموح لهم فقط</label><label class="opt"><input type="radio" name="cmdmode" value="all"${c.cmd_mode==='all'?' checked':''}>أي شخص يراسل البوت</label></div>
+  ${c.cmd_mode!=='all'?`<b style="font-size:13px">المسموح لهم (المعرّف الرقمي أو اسم المستخدم، واحد في كل سطر)</b>
+  <textarea id="cmdusers" rows="3" class="ltr" placeholder="123456789&#10;@username">${esc((c.cmd_users||[]).join('\n'))}</textarea>
+  <div class="row"><button class="ibtn" id="cmdsave">حفظ القائمة</button></div>
+  ${st.requests.length?`<b style="font-size:13px">طلبوا استخدام البوت:</b><div class="chatlist">${st.requests.map(r=>`<button data-cmdallow="${esc(String(r.id))}">${esc(r.name||'')}${r.username?' @'+esc(r.username):''} <span class="mt" style="color:var(--faint)">${r.id}</span> <b style="color:var(--acc)">← سماح</b></button>`).join('')}</div>`:''}
+  <span class="hint">لتعرف معرّفك: أرسل للبوت <code>/start</code> فيظهر اسمك هنا، اضغط «سماح». وأوامرك من داخل قنواتك مسموحة دائماً.</span>`:''}
+  <div class="cmdlist"><code>/ابحث داعش البادية</code><code>/دولة العراق</code><code>/ملخص</code><code>/آخر</code><code>/نوعي</code><code>/انذارات</code></div>`:''}</div>`;
+ if(statusOnly&&$('#bform').innerHTML){const cb=$('#bcmdwrap');if(cb&&!cb.contains(document.activeElement))cb.innerHTML=cmdH;return}
+ const ck=(k,label,sub)=>`<label class="opt"><input type="checkbox" data-bopt="${k}"${ch[k]?' checked':''}><span>${label}${sub?`<small>${sub}</small>`:''}</span></label>`;
+ const ready=c.has_token&&BOTD.channels.some(x=>x.chat);
  $('#bform').innerHTML=`
-  <div class="bigtoggle"><span><b>تشغيل النشر الآلي</b><br><span class="hint">${c.has_token&&c.chat?'كل شيء جاهز':'أكمل الخطوتين 1 و2 أولاً'}</span></span><label class="sw"><input type="checkbox" id="benabled"${c.enabled?' checked':''}><span></span></label></div>
-  <label class="f">1. رمز البوت (Token)
+  <div class="bigtoggle"><span><b>تشغيل النشر الآلي</b><br><span class="hint">${ready?'كل شيء جاهز':'أضف رمز البوت وقناة واحدة على الأقل'}</span></span><label class="sw"><input type="checkbox" id="benabled"${c.enabled?' checked':''}><span></span></label></div>
+  <label class="f">رمز البوت (Token)
    <div class="row"><input type="password" id="btoken" class="ltr" placeholder="${c.has_token?esc(c.token_hint)+' (محفوظ)':'123456789:AA...'}" autocomplete="off"><button class="ibtn primary" id="btokensave">حفظ</button></div>
    <span class="hint">أنشئ بوتاً من <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> في تيليغرام: أرسل له <code>/newbot</code> واختر اسماً، فيعطيك الرمز.</span></label>
-  <label class="f">2. أين تُرسل المقالات؟ (معرّف القناة أو المجموعة)
-   <div class="row"><input type="text" id="bchat" class="ltr" value="${esc(c.chat)}" placeholder="@my_channel  أو  -1001234567890"><button class="ibtn" id="bchatsave">حفظ</button><button class="ibtn" id="bdetect">اكتشاف تلقائي</button></div>
+  <div class="f"><b style="font-size:14px">القنوات</b><span class="hint">لكل قناة إعداداتها: الأقسام والفلتر والسرعة والصورة.</span>
+   <div class="chtabs">${BOTD.channels.map(x=>`<button class="${x.id===BOTCH?'on':''}" data-chsel="${esc(x.id)}">${esc(x.name)}${x.on?'':' (موقوفة)'}</button>`).join('')}<button class="add" id="chadd">+ قناة جديدة</button></div></div>
+  <div class="chbox">
+  <div class="row"><input type="text" id="chname" value="${esc(ch.name)}" style="flex:1" placeholder="اسم القناة (لك فقط)"><button class="ibtn" id="chnamesave">حفظ الاسم</button>
+   <label class="opt"><input type="checkbox" id="chon"${ch.on?' checked':''}>نشطة</label>${BOTD.channels.length>1?'<button class="ibtn" id="chdel" style="color:var(--red)">حذف القناة</button>':''}</div>
+  <label class="f">1. معرّف القناة أو المجموعة
+   <div class="row"><input type="text" id="bchat" class="ltr" value="${esc(ch.chat)}" placeholder="@my_channel  أو  -1001234567890"><button class="ibtn" id="bchatsave">حفظ</button><button class="ibtn" id="bdetect">اكتشاف تلقائي</button><button class="ibtn" id="btest">رسالة تجريبية</button></div>
    <span class="hint"><ol><li>لقناة: أضف البوت مشرفاً في القناة، ثم اكتب معرّفها مثل <code>@my_channel</code>.</li><li>لمجموعة أو محادثة خاصة: أضف البوت أو أرسل له <code>/start</code>، ثم اضغط «اكتشاف تلقائي» واختر من القائمة.</li></ol></span>
    <div class="chatlist" id="bchats"></div></label>
-  <div class="row"><button class="ibtn" id="btest">إرسال رسالة تجريبية</button></div>
-  <label class="f">3. كل كم يُرسل؟
-   <select id="binterval">${[[60,'كل دقيقة'],[120,'كل دقيقتين'],[300,'كل 5 دقائق'],[600,'كل 10 دقائق'],[900,'كل 15 دقيقة'],[1800,'كل 30 دقيقة'],[3600,'كل ساعة']].map(([v,n])=>`<option value="${v}"${+c.interval===v?' selected':''}>${n}</option>`).join('')}</select></label>
+  <label class="f">2. سرعة الإرسال
+   <div class="row"><span>رسالة واحدة كل</span><select id="binterval">${(()=>{const P=[[30,'30 ثانية'],[60,'دقيقة'],[120,'دقيقتين'],[180,'3 دقائق'],[300,'5 دقائق'],[600,'10 دقائق'],[900,'15 دقيقة'],[1200,'20 دقيقة'],[1800,'30 دقيقة'],[2700,'45 دقيقة'],[3600,'ساعة'],[7200,'ساعتين'],[10800,'3 ساعات'],[21600,'6 ساعات'],[43200,'12 ساعة'],[86400,'يوم']];if(!P.some(x=>x[0]===+ch.interval))P.push([+ch.interval,Math.round(ch.interval/60)+' دقيقة']);return P.map(([v,n])=>`<option value="${v}"${+ch.interval===v?' selected':''}>${n}</option>`).join('')})()}</select>
+    <span>أو</span><input type="number" id="bintmin" min="0.5" max="1440" step="0.5" placeholder="دقائق" style="width:90px;flex:none"><button class="ibtn" id="bintsave">تطبيق</button></div>
+   <div class="row"><span>حد أقصى في اليوم:</span><input type="number" id="bmaxday" min="0" max="2000" value="${+ch.max_day||''}" placeholder="بلا حد" style="width:100px;flex:none"><span class="hint">رسالة (اتركه فارغاً لبلا حد)</span></div>
+   <div class="row"><span>ساعات النشر من</span><select id="bhfrom">${Array.from({length:24},(_,h)=>`<option value="${h}"${+ch.hours_from===h?' selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('')}</select><span>إلى</span><select id="bhto">${Array.from({length:24},(_,h)=>h+1).map(h=>`<option value="${h}"${(+ch.hours_to||24)===h?' selected':''}>${String(h%24).padStart(2,'0')}:00${h===24?' (منتصف الليل)':''}</option>`).join('')}</select><button class="ibtn" id="bhsave">حفظ</button></div>
+   <span class="hint">00:00 إلى منتصف الليل = طوال اليوم. خارج هذه الساعات تتوقف القناة وتكمل تلقائياً بعدها.</span></label>
+  <label class="f">3. فلترة العناوين
+   <div class="bflt"><div><b>أرسل فقط ما يحتوي على</b><textarea id="binc" rows="5" placeholder="كلمة أو عبارة في كل سطر، مثلاً:&#10;سوريا&#10;هيئة تحرير الشام&#10;داعش + العراق">${esc((ch.inc||[]).join('\n'))}</textarea></div>
+    <div><b>ولا ترسل ما يحتوي على</b><textarea id="bexc" rows="5" placeholder="مثلاً:&#10;كرة القدم&#10;مباراة&#10;أسعار الذهب">${esc((ch.exc||[]).join('\n'))}</textarea></div></div>
+   <div class="row"><label class="opt"><input type="radio" name="bscope" value="title"${ch.scope!=='all'?' checked':''}>في العنوان فقط</label><label class="opt"><input type="radio" name="bscope" value="all"${ch.scope==='all'?' checked':''}>في العنوان والملخص</label>
+    <span>عمر الخبر حتى</span><select id="bfresh">${[[1,'ساعة'],[3,'3 ساعات'],[6,'6 ساعات'],[12,'12 ساعة'],[24,'يوم'],[48,'يومين'],[72,'3 أيام'],[168,'أسبوع']].map(([v,n])=>`<option value="${v}"${(+ch.fresh_h||168)===v?' selected':''}>${n}</option>`).join('')}</select></div>
+   <div class="row"><button class="ibtn primary" id="bfltsave">حفظ الفلتر</button><button class="ibtn" id="bfltprev">معاينة: ماذا سيُرسل؟</button></div>
+   <span class="hint">كل سطر شرط مستقل يكفي تحقق أحدها. اجمع كلمات بعلامة <code>+</code> لتشترط وجودها معاً (مثل <code>داعش + العراق</code>). لا فرق بين أ وإ وا، ولا بين ة وه. اترك الخانة الأولى فارغة لإرسال كل الأخبار.</span>
+   <div class="bprev" id="bprev"></div></label>
   <label class="f">4. الأقسام التي يُرسل منها
-   <div class="cks">${BOTD.cats.map(k=>`<label><input type="checkbox" data-bcat="${k.key}"${c.cats.includes(k.key)?' checked':''}>${esc(k.name)}</label>`).join('')}</div></label>
+   <div class="cks">${BOTD.cats.map(k=>`<label><input type="checkbox" data-bcat="${k.key}"${ch.cats.includes(k.key)?' checked':''}>${esc(k.name)}</label>`).join('')}</div></label>
   <div class="f" style="display:flex;flex-direction:column;gap:10px">
-   ${ck('preview','معاينة الرابط','يُظهر تيليغرام صورة المقال وعنوانه أسفل الرسالة')}
+   ${ck('photo','إرسال صورة المقال مع الخبر','يرسل صورة المقال من موقعه مع العنوان والملخص في رسالة واحدة. إن لم توجد صورة يُرسل نصاً كالمعتاد')}
+   ${ck('preview','معاينة الرابط (للرسائل النصية)','يُظهر تيليغرام صورة المقال وعنوانه أسفل الرسالة')}
    <span class="hint">لا تُرسل الأخبار النوعية ولا الإنذارات ولا مقاطع الفيديو؛ يرسل البوت المقالات والدراسات والأخبار العالمية فقط.</span>
-  </div>`}
+  </div></div>
+  <div id="bcmdwrap">${cmdH}</div>`}
 $('#botview').addEventListener('change',e=>{const t=e.target;
  if(t.id==='benabled')return bpost({enabled:t.checked},t.checked?'بدأ النشر الآلي':'توقف النشر الآلي');
- if(t.id==='binterval')return bpost({interval:+t.value},'حُفظ');
- if(t.dataset.bcat)return bpost({cats:[...document.querySelectorAll('[data-bcat]:checked')].map(x=>x.dataset.bcat)},'حُفظت الأقسام');
- if(t.dataset.bopt)return bpost({[t.dataset.bopt]:t.checked},'حُفظ')});
+ if(t.id==='cmdon')return bpost({cmd_on:t.checked});
+ if(t.name==='cmdmode')return bpost({cmd_mode:t.value});
+ if(t.id==='chon')return bch({on:t.checked});
+ if(t.id==='binterval')return bch({interval:+t.value});
+ if(t.id==='bfresh')return bch({fresh_h:+t.value});
+ if(t.name==='bscope')return bch({scope:t.value});
+ if(t.id==='bmaxday')return bch({max_day:+t.value||0});
+ if(t.dataset.bcat)return bch({cats:[...document.querySelectorAll('[data-bcat]:checked')].map(x=>x.dataset.bcat)});
+ if(t.dataset.bopt)return bch({[t.dataset.bopt]:t.checked})});
 $('#botview').addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
- if(t.id==='btokensave'){const v=$('#btoken').value.trim();if(!v)return;toast('جارٍ التحقق من الرمز…');return bpost({token:v},'حُفظ رمز البوت')}
- if(t.id==='bchatsave')return bpost({chat:$('#bchat').value.trim()},'حُفظ معرّف المحادثة');
- if(t.id==='btest'){try{await api('/api/bot/test',{method:'POST'});toast('أُرسلت الرسالة التجريبية، تحقق من تيليغرام')}catch(err){toast(err.message)}return}
- if(t.id==='bsendnow'){t.disabled=true;try{const d=await api('/api/bot/send-now',{method:'POST'});toast(d.sent?'أُرسلت مقالة':'لا توجد مقالات جديدة غير مرسلة في الأقسام المختارة')}catch(err){toast(err.message)}t.disabled=false;return loadBot(true)}
- if(t.id==='breset'){if(!confirm('مسح سجل الإرسال؟ قد يُعاد إرسال مقالات سبق إرسالها.'))return;await api('/api/bot/reset',{method:'POST'});toast('مُسح السجل');return loadBot(true)}
+ if(t.dataset.chsel){BOTCH=t.dataset.chsel;$('#bform').innerHTML='';return loadBot()}
+ if(t.id==='chadd'){const n=prompt('اسم القناة الجديدة:','قناة '+(BOTD.channels.length+1));if(!n)return;try{const d=await bpostJ('/api/bot/channel',{name:n});BOTCH=d.id;$('#bform').innerHTML='';loadBot()}catch(err){alert(err.message)}return}
+ if(t.id==='chdel'){if(!confirm('حذف هذه القناة وإعداداتها؟'))return;try{await api('/api/bot/channel/'+encodeURIComponent(BOTCH),{method:'DELETE'});BOTCH=null;$('#bform').innerHTML='';loadBot()}catch(err){alert(err.message)}return}
+ if(t.id==='chnamesave')return bch({name:$('#chname').value.trim()});
+ if(t.id==='btokensave'){const v=$('#btoken').value.trim();if(!v)return;return bpost({token:v})}
+ if(t.id==='bchatsave')return bch({chat:$('#bchat').value.trim()});
+ if(t.id==='bintsave'){const m=parseFloat($('#bintmin').value);if(!(m>0))return;return bch({interval:Math.round(m*60)})}
+ if(t.id==='bhsave')return bch({hours_from:+$('#bhfrom').value,hours_to:+$('#bhto').value});
+ if(t.id==='bfltsave'){await bch({inc:$('#binc').value,exc:$('#bexc').value});return}
+ if(t.id==='bfltprev'){$('#bprev').innerHTML='<span class="spinner">…</span>';
+  try{const d=await bpostJ('/api/bot/preview',{ch:BOTCH,inc:$('#binc').value,exc:$('#bexc').value,scope:(document.querySelector('[name=bscope]:checked')||{}).value});
+   $('#bprev').innerHTML=`<b>يطابق الفلتر ${d.matched} من ${d.total} مادة في الأقسام والمدة المختارة</b>`+(d.items.length?'<ul>'+d.items.map(i=>`<li><button class="t" data-open="${i.id}">${esc(i.title)}</button><span>${esc(i.source||'')} · ${ago(i.published)}</span></li>`).join('')+'</ul>':'<div class="hint">لا يوجد ما يطابق حالياً.</div>')}
+  catch(err){$('#bprev').innerHTML=`<span class="warn">${esc(err.message)}</span>`}return}
+ if(t.id==='btest'){t.disabled=true;try{await bpostJ('/api/bot/test',{ch:BOTCH});t.textContent='✔ أُرسلت'}catch(err){alert(err.message)}t.disabled=false;return}
+ if(t.id==='bsendnow'){t.disabled=true;try{const d=await bpostJ('/api/bot/send-now',{ch:BOTCH});t.textContent=d.sent?'✔ أُرسلت':'لا جديد يطابق';setTimeout(()=>t.textContent='أرسل مقالة الآن',2500)}catch(err){alert(err.message)}t.disabled=false;return loadBot(true)}
+ if(t.id==='breset'){if(!confirm('مسح سجل الإرسال لهذه القناة؟ قد يُعاد إرسال مقالات سبق إرسالها.'))return;await bpostJ('/api/bot/reset',{ch:BOTCH});return loadBot(true)}
+ if(t.id==='cmdsave')return bpost({cmd_users:$('#cmdusers').value});
+ if(t.dataset.cmdallow)return bpost({cmd_add:t.dataset.cmdallow});
  if(t.id==='bdetect'){$('#bchats').innerHTML='<span class="spinner">جارٍ البحث…</span>';
   try{const d=await api('/api/bot/chats');$('#bchats').innerHTML=d.chats.length?d.chats.map(c=>`<button data-bchat="${c.id}">${esc(c.name||String(c.id))} <span class="mt" style="color:var(--faint)">${c.id} · ${esc(c.type)}</span></button>`).join(''):'<span class="hint">لم يُعثر على محادثات. أرسل للبوت رسالة أو اكتب في المجموعة بعد إضافته، ثم أعد المحاولة.</span>'}
   catch(err){$('#bchats').innerHTML=`<span class="warn">${esc(err.message)}</span>`}return}
- if(t.dataset.bchat){$('#bchat').value=t.dataset.bchat;return bpost({chat:t.dataset.bchat},'حُفظ معرّف المحادثة')}});
+ if(t.dataset.bchat){$('#bchat').value=t.dataset.bchat;return bch({chat:t.dataset.bchat})}});
 setInterval(()=>{if(S.cat==='bot')loadBot(true)},5000);
+
+
+/* الملخص اليومي */
+let DAILY=null;
+async function loadDaily(day){
+ try{DAILY=await api('/api/daily'+(day?'?day='+encodeURIComponent(day):''))}catch(e){return}
+ const d=DAILY,c=d.cfg;
+ $('#dailyday').innerHTML=d.days.length?d.days.map(x=>`<option value="${esc(x.day)}"${d.report&&d.report.day===x.day?' selected':''}>${esc(x.day)} · ${x.n} مادة</option>`).join(''):'<option value="">لا ملخصات بعد</option>';
+ $('#dailypdf').disabled=$('#dailysend').disabled=!d.report;
+ $('#dailybody').innerHTML=d.report?`<div class="dmeta">أُنشئ ${fmt(d.report.created)} · يغطي آخر 24 ساعة${d.report.ai?' · مع فقرة بالذكاء الاصطناعي':''}</div>`+d.report.html
+  :'<div class="empty"><b>لا يوجد ملخص بعد</b>يُنشأ تلقائياً كل يوم في الساعة المحددة، أو اضغط «إنشاء الآن».</div>';
+ const PV={free:'المحرك المجاني',claude:'Claude',gemini:'Gemini',ollama:'Ollama'};
+ $('#dailyset').innerHTML=`
+  <label class="opt"><input type="checkbox" data-dset="on"${c.on?' checked':''}>إنشاء الملخص تلقائياً كل يوم</label>
+  <label class="f">الساعة<select id="dhour" class="dsel">${Array.from({length:24},(_,h)=>`<option value="${h}"${+c.hour===h?' selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('')}</select></label>
+  <label class="opt"><input type="checkbox" data-dset="ai"${c.ai?' checked':''}><span>إضافة فقرة «الصورة العامة» بالذكاء الاصطناعي<small>تُكتب بمحرك الكتابة المختار حالياً (${PV[d.provider]||d.provider}) من صفحة كاتب المقالات</small></span></label>
+  <label class="opt"><input type="checkbox" data-dset="tg"${c.tg?' checked':''}${d.has_token?'':' disabled'}><span>إرساله تلقائياً إلى تيليغرام${d.has_token?'':'<small>يحتاج إعداد البوت أولاً</small>'}</span></label>
+  ${d.has_token?`<div class="cks">${d.channels.map(ch=>`<label><input type="checkbox" data-dch="${esc(ch.id)}"${(!c.chs.length||c.chs.includes(ch.id))?' checked':''}${ch.ready?'':' disabled'}>${esc(ch.name)}</label>`).join('')}</div><span class="hint">القنوات التي يُرسل إليها الملخص.</span>`:''}
+  <span class="hint">يمكنك أيضاً طلب الملخص في أي وقت بإرسال <code>/ملخص</code> للبوت (بعد تفعيل أوامر البوت).</span>`}
+function dset(b){return api('/api/daily',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(()=>loadDaily($('#dailyday').value))}
+$('#dailyview').addEventListener('change',e=>{const t=e.target;
+ if(t.id==='dailyday')return loadDaily(t.value);
+ if(t.id==='dhour')return dset({hour:+t.value});
+ if(t.dataset.dset)return dset({[t.dataset.dset]:t.checked});
+ if(t.dataset.dch)return dset({chs:[...document.querySelectorAll('[data-dch]:checked')].map(x=>x.dataset.dch)})});
+$('#dailyview').addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
+ if(t.id==='dailybuild'){t.disabled=true;t.textContent='جارٍ الإنشاء…';try{const d=await api('/api/daily/build',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await loadDaily(d.day)}catch(err){alert(err.message)}t.disabled=false;t.textContent='إنشاء الآن';return}
+ if(t.id==='dailypdf'){const dd=$('#dailyday').value;if(dd)window.open('/print/daily/'+encodeURIComponent(dd),'_blank');return}
+ if(t.id==='dailysend'){t.disabled=true;try{const d=await api('/api/daily/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({day:$('#dailyday').value})});t.textContent='✔ أُرسل إلى '+d.n+' قناة'}catch(err){alert(err.message)}setTimeout(()=>{t.disabled=false;t.textContent='إرسال إلى تيليغرام'},2500);return}});
 
 /* كاتب المقالات */
 let WCFG=null,WBODY='',WABORT=null,WSAVED=null;
@@ -6734,7 +7575,7 @@ async function poll(){
   d.items.forEach(i=>{const o=ITEMS.get(i.id);if(o&&o.translated!==1&&i.translated===1){ITEMS.set(i.id,i);const el=document.querySelector(`#feed [data-id="${i.id}"]`);if(el)el.outerHTML=card(i,el.classList.contains('lead'))}});
   if(!S.ids.size&&d.items.length)return load(true);
   const fresh=d.items.filter(i=>!S.ids.has(i.id));
-  if(fresh.length){$('#newpill').hidden=false;$('#newpill').textContent=fresh.length+' عنصر جديد، اضغط لعرضها';document.title=`(${fresh.length}) مركز أبو زبيدة`}
+  if(fresh.length&&window.scrollY<250&&!$('#dlg').open)load(true);          /* تظهر الأخبار الجديدة بصمت دون إشعار */
  }catch(e){}}
 
 /* نافذة القراءة */
@@ -6841,11 +7682,18 @@ async function copyItem(id){const it=ITEMS.get(id)||savedList().find(x=>x.id===i
  navigator.clipboard.writeText(t).then(()=>toast('نُسخ النص والرابط'),()=>toast('تعذّر النسخ'))}
 
 /* الأحداث */
+let SETCLK=0,SETCLK_T=0;
+const SUPPORT={url:__SUPPORT_URL__,wa:__DEV_WA__};
+$('#supdlg').addEventListener('click',e=>{if(e.target.id==='supdlg')$('#supdlg').close()});
 document.addEventListener('click',e=>{
  const t=e.target.closest('button,a');if(!t)return;
  const ds=t.dataset;
  const gm=(t.getAttribute('href')||'').match(/^\/(?:go|print)\/([0-9a-f]+)/);if(gm)markVisited(gm[1]);
+ if(ds.cat==='settings'){const n=Date.now();SETCLK=(n-SETCLK_T<3000)?SETCLK+1:1;SETCLK_T=n;
+  if(SETCLK>=6){SETCLK=0;e.preventDefault();return setView('bot')}}
  if(ds.cat){e.preventDefault();$('#dlg').open&&$('#dlg').close();return setView(ds.cat)}
+ if(t.id==='supportbtn'){$('#supacts').innerHTML=(SUPPORT.url?`<a class="ibtn primary" href="${esc(SUPPORT.url)}" target="_blank" rel="noopener">ادعم المشروع الآن</a>`:'')+(SUPPORT.wa?`<a class="ibtn${SUPPORT.url?'':' primary'}" href="https://wa.me/${esc(SUPPORT.wa)}?text=${encodeURIComponent('السلام عليكم، أرغب في دعم مشروع مركز أبو زبيدة للتتبع والرصد')}" target="_blank" rel="noopener">تواصل مع المطور (واتساب)</a>`:'');$('#supdlg').showModal();return}
+ if(t.id==='supclose'){$('#supdlg').close();return}
  if(ds.center!==undefined){$('#dlg').open&&$('#dlg').close();return openCenter(ds.center)}
  if(ds.open)return openItem(ds.open);
  if(ds.save)return toggleSave(ds.save);
@@ -6893,17 +7741,14 @@ document.addEventListener('click',e=>{
  if(ds.blang!==undefined){BF.lang=ds.blang;document.querySelectorAll('#blang button').forEach(b=>b.classList.toggle('on',b===t));return loadBooks()}
  if(ds.book)return openBook(ds.book);
  if(ds.booktr)return translateBook(ds.booktr);
- if(ds.tag){$('#dlg').open&&$('#dlg').close();if(['saved','health','centers','dash','tweets','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','net','settings'].includes(S.cat))setView('all');S.tag=ds.tag;renderActiveTag();if(S.cat==='center')renderCenterHead();if(S.cat==='country')renderCountryHead();if(META)renderTags();load(true);return}
+ if(ds.tag){$('#dlg').open&&$('#dlg').close();if(['saved','health','centers','dash','tweets','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','net','settings','daily'].includes(S.cat))setView('all');S.tag=ds.tag;renderActiveTag();if(S.cat==='center')renderCenterHead();if(S.cat==='country')renderCountryHead();if(META)renderTags();load(true);return}
  if(ds.hours!==undefined){S.hours=+ds.hours;document.querySelectorAll('#hours button').forEach(b=>b.classList.toggle('on',b===t));if(S.cat!=='saved')load(true);return}
  if(ds.cregion!==undefined){CF.region=ds.cregion;document.querySelectorAll('#cregion button').forEach(b=>b.classList.toggle('on',b===t));return renderCenterGrid()}
  if(ds.ccat!==undefined){CF.cat=ds.ccat;document.querySelectorAll('#ccat button').forEach(b=>b.classList.toggle('on',b===t));return renderCenterGrid()}
  if(t.id==='trtest')return trTest();
  if(t.id==='updgo'||t.id==='updgo2'){toast('يجري إعادة التشغيل…');api('/api/update/restart',{method:'POST'}).catch(()=>{});setTimeout(()=>location.reload(),6000);return}
  if(t.id==='updlater'){sessionStorage.setItem('upd_later','1');$('#updbar').hidden=true;return}
- if(t.id==='updsave'){api('/api/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo:$('#updrepo').value,branch:$('#updbranch').value})}).then(()=>{toast('حُفظ');loadUpdBox()});return}
  if(t.id==='updcheck'){t.disabled=true;t.textContent='جارٍ الفحص…';api('/api/update/check',{method:'POST'}).then(d=>{toast(d.state.error||d.state.state||'تم');loadUpdBox();loadMeta().then(updBanner)}).catch(()=>toast('تعذّر الفحص'));return}
- if(t.id==='wallbtn'||t.id==='wallgo')return wallStart();
- if(t.id==='wallexit')return wallStop();
  if(t.id==='cmdbtn')return cmdOpen();
  if(t.id==='askgo')return askGo();
  if(t.id==='askcopy')return navigator.clipboard.writeText(ASKTXT).then(()=>toast('نُسخت الإجابة'));
@@ -6948,7 +7793,7 @@ $('#brefresh').onclick=async()=>{await api('/api/books/refresh',{method:'POST'})
 $('#dlgClose').onclick=()=>$('#dlg').close();
 $('#dlg').addEventListener('click',e=>{if(e.target.id==='dlg')$('#dlg').close()});
 $('#dlg').addEventListener('close',()=>{S.openId=null;CUR.id=null});
-let qt;$('#q').oninput=e=>{clearTimeout(qt);qt=setTimeout(()=>{S.q=e.target.value.trim();if(['health','centers','dash','tweets','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','net','settings'].includes(S.cat))setView('all');else if(S.cat==='saved')renderSaved();else load(true)},400)};
+let qt;$('#q').oninput=e=>{clearTimeout(qt);qt=setTimeout(()=>{S.q=e.target.value.trim();if(['health','centers','dash','tweets','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','net','settings','daily'].includes(S.cat))setView('all');else if(S.cat==='saved')renderSaved();else load(true)},400)};
 document.addEventListener('keydown',e=>{if(e.key==='Enter'&&document.activeElement?.id==='qslide'){openItem(document.activeElement.dataset.open);return}if(e.key==='/'&&!['INPUT','SELECT'].includes(document.activeElement.tagName)){e.preventDefault();$('#q').focus()}});
 $('#refresh').onclick=async()=>{const d=await api('/api/refresh',{method:'POST'});toast(d.running?'دورة جلب جارية بالفعل':'بدأ تحديث جميع المصادر');$('#refresh').classList.add('spin');setTimeout(poll,4000)};
 function applySkin(t){if(!['neon','ops','gold','light'].includes(t))t='neon';document.documentElement.dataset.theme=t;document.querySelectorAll('[data-skin]').forEach(b=>b.classList.toggle('on',b.dataset.skin===t));lsSet('rased_skin',t)}
@@ -6993,6 +7838,8 @@ if __name__ == "__main__":
     threading.Thread(target=safe(countries_backfill), daemon=True).start()
     threading.Thread(target=books_loop, daemon=True).start()
     threading.Thread(target=bot_loop, daemon=True).start()
+    threading.Thread(target=bot_cmd_loop, daemon=True).start()
+    threading.Thread(target=daily_loop, daemon=True).start()
     threading.Thread(target=analysis_loop, daemon=True).start()
     threading.Thread(target=sanctions_loop, daemon=True).start()
     threading.Thread(target=archiver_loop, daemon=True).start()
