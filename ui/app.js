@@ -6,7 +6,6 @@ const S={cat:'dash',hours:0,source:'',tag:'',q:'',page:1,per:30,total:0,ids:new 
 const CF={q:'',region:'',cat:''};
 const TITLE_DEFAULT='مركز أبو زبيدة للتتبع والرصد';
 const DESC={
- net:'حالة الاتصال بالإنترنت في دول المنطقة لحظياً. انقطاع الإنترنت كثيراً ما يسبق عملية عسكرية أو يرافقها. المصدر: مرصد IODA في معهد جورجيا للتقنية.',
  settings:'التحديث التلقائي، والفتح من الجوال، ووضع الشاشة الكبيرة.',
  ask:'اسأل سؤالاً عادياً، فيجيبك المركز من الأخبار والدراسات التي رصدها، مع أرقام مصادر كل معلومة.',
  research:'نتائج البحث في دراسات ومقالات كل مراكز البحث ومكافحة الإرهاب والأمن فقط، دون الأخبار.',
@@ -37,8 +36,8 @@ const DESC={
  books:'كتب صدرت خلال آخر سنتين عن الإرهاب والحروب والسياسة والأمن والاستخبارات، مع غلافها وملخصها المترجم ورابطها.',
  health:'حالة كل مصدر في آخر دورة جلب. المصادر التي لا يعمل رابطها تُجلب عبر بحث أخبار Google لنفس الموقع.'
 };
-const CODES={research:'SEARCH / CENTERS',net:'SIGINT / INTERNET',settings:'SYSTEM / SETTINGS',ask:'QUERY / ASK',sanctions:'DESIGNATIONS / SANCTIONS',cases:'CASE FILES',archive:'EVIDENCE / ARCHIVE',official:'SEC-11 / OFFICIAL',map:'GEO / LIVE-MAP',alerts:'EARLY WARNING / ALERTS',bot:'RELAY / TELEGRAM-BOT',writer:'STUDIO / WRITER',qual:'CRITICAL / EVENTS',dash:'COMMAND / OVERVIEW',all:'ALL-SOURCES',world:'SEC-01 / GLOBAL',arab:'SEC-02 / ARAB',think_global:'SEC-03 / THINK-TANKS',think_arab:'SEC-04 / ARAB-RESEARCH',terror:'SEC-05 / COUNTER-TERRORISM',war:'SEC-06 / CONFLICT',economy:'SEC-07 / ECONOMY',tweets:'SEC-08 / TELEGRAM',keywords:'SEC-09 / WATCHLIST',intel:'SEC-10 / SECURITY-INTEL',countries:'GEO / COUNTRIES',books:'LIBRARY / BOOKS',centers:'DIRECTORY / CENTERS',saved:'ARCHIVE / SAVED',health:'SYSTEM / SOURCES'};
-const EXTRA={research:'البحث في مواد المراكز',net:'رصد انقطاع الإنترنت',settings:'الإعدادات',ask:'اسأل المركز',sanctions:'العقوبات والتصنيفات',cases:'ملفات القضايا',archive:'الأرشيف والعناوين المعدّلة',map:'الخريطة التفاعلية',alerts:'الإنذار المبكر',bot:'بوت تيليغرام',writer:'كاتب المقالات والدراسات',qual:'أخبار نوعية',dash:'لوحة القيادة',all:'كل الأخبار',countries:'الدول',books:'مكتبة الكتب',centers:'دليل المراكز',saved:'المحفوظات',health:'صحة المصادر والترجمة'};
+const CODES={research:'SEARCH / CENTERS',settings:'SYSTEM / SETTINGS',ask:'QUERY / ASK',sanctions:'DESIGNATIONS / SANCTIONS',cases:'CASE FILES',archive:'EVIDENCE / ARCHIVE',official:'SEC-11 / OFFICIAL',map:'GEO / LIVE-MAP',alerts:'EARLY WARNING / ALERTS',bot:'RELAY / TELEGRAM-BOT',writer:'STUDIO / WRITER',qual:'CRITICAL / EVENTS',dash:'COMMAND / OVERVIEW',all:'ALL-SOURCES',world:'SEC-01 / GLOBAL',arab:'SEC-02 / ARAB',think_global:'SEC-03 / THINK-TANKS',think_arab:'SEC-04 / ARAB-RESEARCH',terror:'SEC-05 / COUNTER-TERRORISM',war:'SEC-06 / CONFLICT',economy:'SEC-07 / ECONOMY',tweets:'SEC-08 / TELEGRAM',keywords:'SEC-09 / WATCHLIST',intel:'SEC-10 / SECURITY-INTEL',countries:'GEO / COUNTRIES',books:'LIBRARY / BOOKS',centers:'DIRECTORY / CENTERS',saved:'ARCHIVE / SAVED',health:'SYSTEM / SOURCES'};
+const EXTRA={research:'البحث في مواد المراكز',settings:'الإعدادات',ask:'اسأل المركز',sanctions:'العقوبات والتصنيفات',cases:'ملفات القضايا',archive:'الأرشيف والعناوين المعدّلة',map:'الخريطة التفاعلية',alerts:'الإنذار المبكر',bot:'بوت تيليغرام',writer:'كاتب المقالات والدراسات',qual:'أخبار نوعية',dash:'لوحة القيادة',all:'كل الأخبار',countries:'الدول',books:'مكتبة الكتب',centers:'دليل المراكز',saved:'المحفوظات',health:'صحة المصادر والترجمة'};
 const P={
  radar:'<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><path d="M12 12l6.4-6.4"/>',
  grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
@@ -74,7 +73,7 @@ const P={
  pdf:'<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M9 13h6M9 16h4"/>',
  swap:'<path d="M7 7h12l-3-3M17 17H5l3 3"/>'
 };
-const CICON={research:'centers',net:'wifi',settings:'gear',ask:'search',sanctions:'shield',cases:'centers',archive:'bookmark',official:'columns',map:'globe',alerts:'bell',bot:'send',writer:'pen',qual:'bolt',dash:'radar',all:'grid',world:'globe',arab:'news',think_global:'columns',think_arab:'building',terror:'shield',war:'target',economy:'chart',tweets:'send',keywords:'search',intel:'lock',countries:'flag',country:'flag',books:'book',centers:'centers',saved:'bookmark',health:'pulse'};
+const CICON={research:'centers',settings:'gear',ask:'search',sanctions:'shield',cases:'centers',archive:'bookmark',official:'columns',map:'globe',alerts:'bell',bot:'send',writer:'pen',qual:'bolt',dash:'radar',all:'grid',world:'globe',arab:'news',think_global:'columns',think_arab:'building',terror:'shield',war:'target',economy:'chart',tweets:'send',keywords:'search',intel:'lock',countries:'flag',country:'flag',books:'book',centers:'centers',saved:'bookmark',health:'pulse'};
 const ico=(n)=>`<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${P[n]||''}</svg>`;
 
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -170,7 +169,7 @@ function navi(key,name,color,count,ratio){return `<button class="navi${S.cat===k
 function renderNav(){
  const sum=META.categories.reduce((a,c)=>a+c.day,0);
  const max=Math.max(1,...META.categories.map(c=>c.day));
- let h='<div class="navgrp">COMMAND</div>'+navi('dash','لوحة القيادة','var(--acc)','')+navi('qual','أخبار نوعية','var(--red)',QSTATS?QSTATS.total:'')+navi('alerts','الإنذار المبكر','#F59E0B',ALN||'')+navi('map','الخريطة التفاعلية','var(--acc)','')+navi('net','انقطاع الإنترنت','#A78BFA',NETBAD||'')+navi('ask','اسأل المركز','var(--acc)','')+navi('all','كل الأخبار','var(--acc)',sum);
+ let h='<div class="navgrp">COMMAND</div>'+navi('dash','لوحة القيادة','var(--acc)','')+navi('qual','أخبار نوعية','var(--red)',QSTATS?QSTATS.total:'')+navi('alerts','الإنذار المبكر','#F59E0B',ALN||'')+navi('map','الخريطة التفاعلية','var(--acc)','')+navi('ask','اسأل المركز','var(--acc)','')+navi('all','كل الأخبار','var(--acc)',sum);
  h+='<div class="navgrp">SECTIONS / الأقسام</div>';
  META.categories.forEach(c=>h+=navi(c.key,c.name,c.color,c.day,c.key==='tweets'||c.key==='keywords'?null:c.day/max));
  h+='<div class="navgrp">TOOLS / الأدوات</div>'+navi('centers','دليل المراكز','var(--acc)',CENTERS.length||'')+navi('countries','الدول','var(--acc)',CTY.length||'')+navi('books','مكتبة الكتب','var(--gold)',BOOKS_N||'')+navi('writer','كاتب المقالات','var(--acc)','')+navi('bot','بوت تيليغرام','#38BDF8',BOTON?'يعمل':'')+navi('sanctions','العقوبات والتصنيفات','#E11D48',META.sanc_new||'')+navi('cases','ملفات القضايا','var(--gold)','')+navi('archive','الأرشيف','var(--acc)','')+navi('saved','المحفوظات','var(--gold)',savedList().length||'')+navi('settings','الإعدادات','var(--muted)','')+navi('health','صحة المصادر والترجمة',META.health.fail||META.tr_stats.down?'var(--red)':'var(--green)',META.health.fail?META.health.fail+' متعطل':'');
@@ -208,9 +207,9 @@ function setView(cat){
  S.cat=cat;S.source='';S.tag='';S.page=1;if(cat!=='center')S.center='';if(cat!=='country')S.country='';
  $('#title').textContent=EXTRA[cat]||CAT[cat]?.name||'';
  $('#desc').textContent=DESC[cat]||'';$('#pcode').textContent=CODES[cat]||'';
- const feedViews=!['dash','tweets','centers','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','net','settings'].includes(cat);
+ const feedViews=!['dash','tweets','centers','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','settings'].includes(cat);
  $('#mapview').hidden=cat!=='map';$('#alertsview').hidden=cat!=='alerts';
- $('#netview').hidden=cat!=='net';$('#setview').hidden=cat!=='settings';
+ $('#setview').hidden=cat!=='settings';
  $('#askview').hidden=cat!=='ask';$('#sancview').hidden=cat!=='sanctions';$('#casesview').hidden=cat!=='cases';$('#archview').hidden=cat!=='archive';
  $('#writerview').hidden=cat!=='writer';
  $('#botview').hidden=cat!=='bot';
@@ -244,7 +243,6 @@ function setView(cat){
  if(cat==='sanctions')return loadSanc();
  if(cat==='cases')return loadCases();
  if(cat==='archive')return loadArch();
- if(cat==='net')return loadNet();
  if(cat==='settings')return loadSettings();
  if(cat==='alerts')return loadAlerts();
  if(cat==='center')renderCenterHead();
@@ -437,8 +435,6 @@ async function loadMap(refresh){
  TILE.setUrl(tileUrl());tileFilter();setTimeout(()=>MAP.invalidateSize(),60);
  let d;try{d=await api('/api/map?hours='+MAPH)}catch(e){return}
  MLAYER.clearLayers();DLAYER.clearLayers();
- (d.net||[]).forEach(n=>{const col=n.level==='critical'?'#A855F7':'#C4B5FD';
-  L.circleMarker([n.lat,n.lon],{radius:16,color:col,weight:2,dashArray:'4 4',fill:true,fillColor:col,fillOpacity:.12}).bindTooltip(`انقطاع إنترنت ${n.level==='critical'?'حرج':'جزئي'}: ${n.name}`,{direction:'top'}).addTo(MLAYER)});
  if($('#mapdens').checked){const mx=Math.max(1,...d.density.map(x=>x.count));
   d.density.forEach(c=>L.circle([c.lat,c.lon],{radius:60000+340000*Math.sqrt(c.count/mx),color:'#38BDF8',weight:1,opacity:.5,fillOpacity:.12,interactive:true}).bindTooltip(`${c.name}: ${c.count} خبراً`,{direction:'top'}).addTo(DLAYER))}
  const counts={};
@@ -543,13 +539,6 @@ async function openArchived(iid){try{const d=await api('/api/archive/'+iid);cons
   <p class="note">مصدر النص: ${esc(a.via||'')}</p>`;
  if(!$('#dlg').open)$('#dlg').showModal()}catch(e){toast('لا توجد نسخة مؤرشفة لهذه المادة بعد')}}
 
-/* انقطاع الإنترنت */
-let NETBAD=0;const NLV={critical:['#A855F7','انقطاع حرج'],warning:['#F59E0B','اضطراب جزئي'],normal:['#2BF0B4','طبيعي']};
-async function loadNet(){try{const d=await api('/api/net');NETBAD=d.countries.filter(c=>c.level!=='normal').length;
- $('#netgrid').innerHTML=d.countries.map(c=>`<div class="box netc" style="--nc:${NLV[c.level][0]}"><b>${esc(c.name)}</b><span class="st">${NLV[c.level][1]}</span>${c.sources.length?`<small>${esc(c.sources.join('، '))}</small>`:''}<small>${c.last?'آخر تنبيه '+ago(c.last):'لا تنبيهات خلال 48 ساعة'}</small><a href="${esc(c.link)}" target="_blank" rel="noopener">المنحنى التفصيلي في IODA</a></div>`).join('');
- $('#netlast').textContent=d.error?'تعذّر التحديث: '+d.error:(d.last?'آخر تحديث '+ago(d.last):'أول تحديث بعد دقيقة من التشغيل');
- $('#netrecent').innerHTML=d.recent.length?`<table class="tbl"><thead><tr><th>الدولة</th><th>المستوى</th><th>المؤشر</th><th>الانخفاض</th><th>الوقت</th></tr></thead><tbody>${d.recent.map(r=>`<tr><td>${esc(r.name)}</td><td style="color:${NLV[r.level][0]};font-weight:700">${NLV[r.level][1]}</td><td>${esc(r.source_ar)}</td><td class="mt">${r.value!=null&&r.hist?Math.max(0,Math.round((1-r.value/r.hist)*100))+'%':'—'}</td><td class="mt" style="white-space:nowrap">${fmt(r.ts)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty"><b>لا انقطاعات مرصودة خلال 48 ساعة</b>يفحص المركز كل 10 دقائق. أي انقطاع حرج يظهر هنا وعلى الخريطة، ويُطلق إنذاراً مبكراً وإشعاراً.</div>'}catch(e){}}
-
 /* الإعدادات */
 async function loadSettings(){
  try{LANS=await api('/api/settings');$('#setlan').innerHTML=lanHtml()}catch(e){}
@@ -565,7 +554,7 @@ function updBanner(){const u=META?.update;if(u&&u.ready&&!sessionStorage.getItem
 document.addEventListener('change',e=>{if(e.target.id==='updauto')api('/api/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auto:e.target.checked})}).then(()=>toast('حُفظ'))});
 
 /* وضع الشاشة الكبيرة */
-let WALL={i:0,map:null,layer:null},WSLIDES=['الخريطة الحية','الأحداث النوعية','الإنذارات وحالة الإنترنت','الدول الأكثر حضوراً'];
+let WALL={i:0,map:null,layer:null},WSLIDES=['الخريطة الحية','الأحداث النوعية','الإنذارات المبكرة','الدول الأكثر حضوراً'];
 async function wallStart(){$('#wall').hidden=false;try{await document.documentElement.requestFullscreen()}catch(e){}WALL.i=0;wallClock();WALL.ct=setInterval(wallClock,1000);wallTicker();wallShow()}
 function wallStop(){$('#wall').hidden=true;clearInterval(WALL.ct);clearTimeout(WALL.to);if(document.fullscreenElement)document.exitFullscreen().catch(()=>{})}
 function wallClock(){const n=new Date();$('#wclock').textContent=n.toLocaleTimeString('en-GB')}
@@ -579,12 +568,11 @@ async function wallShow(){
   if(k===0){await loadLeaflet();if(!WALL.map){WALL.map=L.map('wmap',{zoomControl:false,attributionControl:false}).setView([31,40],5);WALL.tile=L.tileLayer(tileUrl(),{maxZoom:18,crossOrigin:true}).addTo(WALL.map);WALL.layer=L.layerGroup().addTo(WALL.map)}
    $('#wmap').classList.toggle('mapdark',document.documentElement.dataset.theme!=='light'&&TILES[TIDX].dark==='invert');setTimeout(()=>WALL.map.invalidateSize(),80);
    const d=await api('/api/map?hours=24');WALL.layer.clearLayers();
-   d.points.forEach(p=>L.circleMarker([p.lat,p.lon],{radius:p.exact?11:8,color:'#fff',weight:1.5,fillColor:p.color,fillOpacity:.9}).bindTooltip(`${p.events[0]}: ${p.title}`,{permanent:false}).addTo(WALL.layer));
-   (d.net||[]).forEach(n=>L.circleMarker([n.lat,n.lon],{radius:22,color:'#A855F7',weight:2,dashArray:'5 5',fillOpacity:.1}).addTo(WALL.layer))}
+   d.points.forEach(p=>L.circleMarker([p.lat,p.lon],{radius:p.exact?11:8,color:'#fff',weight:1.5,fillColor:p.color,fillOpacity:.9}).bindTooltip(`${p.events[0]}: ${p.title}`,{permanent:false}).addTo(WALL.layer));}
   if(k===1){const d=await api('/api/items?'+new URLSearchParams({cat:'all',qual:'1',hours:24,per:6}));
    $('#wpanel').innerHTML=`<div class="wgrid2">${d.items.map(i=>{const e1=(i.events||'').split('|').filter(Boolean)[0];return `<div class="wcard" style="--e:${EVC[e1]||'var(--red)'}"><div class="meta">${evHtml(i.events)}${vfHtml(i)}<span>${hm(i.published)}</span></div><h3>${esc(i.title_ar||i.title)}</h3><div class="meta"><span>${esc(i.source_ar)}</span>${(i.countries||'').split('|').filter(Boolean).slice(0,2).map(c=>`<span>${esc(c)}</span>`).join('')}</div></div>`}).join('')||'<div class="wbig">لا أحداث نوعية خلال 24 ساعة</div>'}</div>`}
-  if(k===2){const [al,nt]=await Promise.all([api('/api/alerts?hours=24'),api('/api/net')]);
-   $('#wpanel').innerHTML=`<div class="wcols"><div class="wlist"><div class="wbig">الإنذارات المبكرة</div>${al.items.slice(0,6).map(a=>alertHtml(a,al.now)).join('')||'<div class="meta">لا إنذارات خلال 24 ساعة</div>'}</div><div><div class="wbig">حالة الإنترنت</div><div class="netgrid">${nt.countries.slice(0,12).map(c=>`<div class="box netc" style="--nc:${NLV[c.level][0]}"><b>${esc(c.name)}</b><span class="st">${NLV[c.level][1]}</span></div>`).join('')}</div></div></div>`}
+  if(k===2){const al=await api('/api/alerts?hours=24');
+   $('#wpanel').innerHTML=`<div class="wlist"><div class="wbig">الإنذارات المبكرة</div>${al.items.slice(0,8).map(a=>alertHtml(a,al.now)).join('')||'<div class="meta">لا إنذارات خلال 24 ساعة</div>'}</div>`}
   if(k===3){await loadCty();const top=CTY.slice().sort((a,b)=>b.day-a.day).slice(0,12);const mx=Math.max(1,...top.map(c=>c.day));
    $('#wpanel').innerHTML=`<div class="wbig">الدول الأكثر حضوراً اليوم</div><div class="netgrid" style="grid-template-columns:repeat(3,1fr)">${top.map(c=>`<div class="box netc" style="--nc:var(--acc)"><b style="font-size:20px">${esc(c.name)}</b><span class="st">${c.day} خبراً اليوم</span><div class="cbar"><i style="width:${Math.round(c.day/mx*100)}%"></i></div></div>`).join('')}</div>`}
  }catch(e){}
@@ -840,7 +828,7 @@ async function renderCenters(){
  const regions=['',...new Set(CENTERS.map(c=>c.region))];
  $('#cregion').innerHTML=regions.map(r=>`<button data-cregion="${esc(r)}" class="${CF.region===r?'on':''}">${esc(r||'كل المناطق')}</button>`).join('');
  $('#ccat').innerHTML=CCATS.map(([k,n])=>`<button data-ccat="${k}" class="${CF.cat===k?'on':''}">${n}</button>`).join('');
- renderCenterGrid()}
+ $('#cq').value=CF.q;renderCenterGrid();if(CF.q){CMP=1;searchCenterItems()}else $('#cmatch').hidden=true}
 function centerCard(c){
  const col=CAT[c.cat]?.color||'var(--acc)';
  return `<button class="ccard" data-center="${esc(c.name)}" style="--c:${col}">
@@ -852,8 +840,26 @@ function centerCard(c){
 function renderCenterGrid(){
  const qq=CF.q.toLowerCase();
  const l=CENTERS.filter(c=>(!CF.region||c.region===CF.region)&&(!CF.cat||c.cat===CF.cat)&&(!qq||(c.name+' '+c.site).toLowerCase().includes(qq)));
- $('#ccount').textContent=l.length+' مركزاً';
- $('#cgrid').innerHTML=l.length?l.map(centerCard).join(''):'<div class="empty"><b>لا توجد مراكز مطابقة</b>غيّر المنطقة أو النوع أو امسح البحث.</div>'}
+ $('#ccount').textContent=qq?(l.length?l.length+' مركزاً بهذا الاسم':''):l.length+' مركزاً';
+ $('#cgridttl').hidden=!qq||!l.length;
+ $('#cgrid').innerHTML=l.length?l.map(centerCard).join(''):(qq?'':'<div class="empty"><b>لا توجد مراكز مطابقة</b>غيّر المنطقة أو النوع أو امسح البحث.</div>')}
+/* البحث في عناوين وملخصات مواد المراكز، داخل الدليل نفسه */
+let CMP=1;
+async function searchCenterItems(more){
+ const qq=CF.q;const box=$('#cmatch');
+ if(!qq){box.hidden=true;return}
+ box.hidden=false;if(!more)$('#cmatchlist').innerHTML='<div class="loading spinner">جارٍ البحث في مواد المراكز…</div>';
+ const inScope=CENTERS.filter(c=>(!CF.region||c.region===CF.region)&&(!CF.cat||c.cat===CF.cat)).map(c=>c.name);
+ if(!inScope.length){$('#cmatchlist').innerHTML='<div class="empty"><b>لا مراكز في هذا التصنيف</b></div>';return}
+ const prm=new URLSearchParams({cat:CF.cat||'all',q:qq,page:CMP,per:20,sources:inScope.join('|')});
+ try{const d=await api('/api/items?'+prm);if(qq!==CF.q)return;
+  d.items.forEach(i=>ITEMS.set(i.id,i));
+  const h=d.items.map(it=>card(it,false)).join('');
+  if(more)$('#cmatchlist').insertAdjacentHTML('beforeend',h);else $('#cmatchlist').innerHTML=h||'<div class="empty"><b>لا توجد مواد مطابقة</b>لم تنشر المراكز شيئاً بهذه الكلمات خلال الأشهر الثلاثة الأخيرة. جرّب كلمة أخرى، بالعربية أو الإنجليزية.</div>';
+  $('#cmatchttl').textContent=`مواد المراكز التي تذكر «${qq}»`;
+  $('#cmatchn').textContent=d.total+' مادة';
+  $('#cmatchmore').hidden=CMP*20>=d.total;
+ }catch(e){$('#cmatchlist').innerHTML='<div class="empty"><b>تعذّر البحث</b></div>'}}
 function openCenter(name){S.center=name;setView('center')}
 function renderCenterHead(){
  const c=CENTERS.find(x=>x.name===S.center)||{name:S.center,region:'',cat:'',site:'',count:0,tags:[]};
@@ -897,7 +903,6 @@ async function poll(){
   if(S.cat==='health')return renderHealth();
   if(S.cat==='bot')return loadBot(true);
   if(S.cat==='map')return loadMap(true);
-  if(S.cat==='net')return loadNet();
   if(['ask','sanctions','cases','archive','settings'].includes(S.cat))return;
   if(S.cat==='alerts')return loadAlerts();
   if(['saved','centers','countries','books','writer'].includes(S.cat))return;
@@ -1064,10 +1069,10 @@ document.addEventListener('click',e=>{
  if(ds.blang!==undefined){BF.lang=ds.blang;document.querySelectorAll('#blang button').forEach(b=>b.classList.toggle('on',b===t));return loadBooks()}
  if(ds.book)return openBook(ds.book);
  if(ds.booktr)return translateBook(ds.booktr);
- if(ds.tag){$('#dlg').open&&$('#dlg').close();if(['saved','health','centers','dash','tweets','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','net','settings'].includes(S.cat))setView('all');S.tag=ds.tag;renderActiveTag();if(S.cat==='center')renderCenterHead();if(S.cat==='country')renderCountryHead();if(META)renderTags();load(true);return}
+ if(ds.tag){$('#dlg').open&&$('#dlg').close();if(['saved','health','centers','dash','tweets','countries','books','writer','bot','map','alerts','ask','sanctions','cases','archive','settings'].includes(S.cat))setView('all');S.tag=ds.tag;renderActiveTag();if(S.cat==='center')renderCenterHead();if(S.cat==='country')renderCountryHead();if(META)renderTags();load(true);return}
  if(ds.hours!==undefined){S.hours=+ds.hours;document.querySelectorAll('#hours button').forEach(b=>b.classList.toggle('on',b===t));if(S.cat!=='saved')load(true);return}
- if(ds.cregion!==undefined){CF.region=ds.cregion;document.querySelectorAll('#cregion button').forEach(b=>b.classList.toggle('on',b===t));return renderCenterGrid()}
- if(ds.ccat!==undefined){CF.cat=ds.ccat;document.querySelectorAll('#ccat button').forEach(b=>b.classList.toggle('on',b===t));return renderCenterGrid()}
+ if(ds.cregion!==undefined){CF.region=ds.cregion;document.querySelectorAll('#cregion button').forEach(b=>b.classList.toggle('on',b===t));CMP=1;searchCenterItems();return renderCenterGrid()}
+ if(ds.ccat!==undefined){CF.cat=ds.ccat;document.querySelectorAll('#ccat button').forEach(b=>b.classList.toggle('on',b===t));CMP=1;searchCenterItems();return renderCenterGrid()}
  if(t.id==='trtest')return trTest();
  if(t.id==='updgo'||t.id==='updgo2'){toast('يجري إعادة التشغيل…');api('/api/update/restart',{method:'POST'}).catch(()=>{});setTimeout(()=>location.reload(),6000);return}
  if(t.id==='updlater'){sessionStorage.setItem('upd_later','1');$('#updbar').hidden=true;return}
@@ -1114,7 +1119,8 @@ $('#density').onclick=()=>{S.compact=!S.compact;lsSet('rased_compact',S.compact?
 $('#kwadd').onclick=addKw;$('#kwinput').onkeydown=e=>{if(e.key==='Enter')addKw()};
 $('#tgadd').onclick=addTg;$('#tgplat').onchange=e=>{$('#tgch').placeholder=e.target.value==='bluesky'?'اسم الحساب أو رابطه، مثل: apnews.com أو name.bsky.social':'اسم القناة أو رابطها، مثل: t.me/AJArabic'};$('#tgch').onkeydown=e=>{if(e.key==='Enter')addTg()};
 $('#tgrefresh').onclick=async()=>{await api('/api/telegram/refresh',{method:'POST'});toast('يجري تحديث كل القنوات');setTimeout(loadTgBoard,8000)};
-$('#cq').oninput=e=>{CF.q=e.target.value.trim();renderCenterGrid()};
+let cqt;$('#cq').oninput=e=>{CF.q=e.target.value.trim();renderCenterGrid();clearTimeout(cqt);cqt=setTimeout(()=>{CMP=1;searchCenterItems()},400)};
+$('#cmatchmore').onclick=()=>{CMP++;searchCenterItems(true)};
 $('#ctyq').oninput=e=>{CTYF.q=e.target.value.trim();renderCtyGrid()};
 let bqt;$('#bq').oninput=e=>{clearTimeout(bqt);bqt=setTimeout(()=>{BF.q=e.target.value.trim();loadBooks()},400)};
 $('#brefresh').onclick=async()=>{await api('/api/books/refresh',{method:'POST'});toast('يجري البحث عن الكتب الجديدة، وستظهر خلال دقائق');setTimeout(loadBooks,15000)};
@@ -1123,8 +1129,8 @@ $('#dlg').addEventListener('click',e=>{if(e.target.id==='dlg')$('#dlg').close()}
 $('#dlg').addEventListener('close',()=>{S.openId=null;CUR.id=null});
 /* البحث داخل القسم الحالي */
 let QALL=false,QBASE='',QSETTING=false;
-const QLOCAL={countries:'#ctyq',books:'#bq',archive:'#archq',sanctions:'#sancq',writer:'#wlogq'};
-const QGLOBAL=['dash','health','tweets','bot','map','alerts','ask','cases','net','settings'];
+const QLOCAL={centers:'#cq',countries:'#ctyq',books:'#bq',archive:'#archq',sanctions:'#sancq',writer:'#wlogq'};
+const QGLOBAL=['dash','health','tweets','bot','map','alerts','ask','cases','settings'];
 function scopeLabel(){const c=S.cat;
  if(c==='center')return S.center;if(c==='country')return S.country;if(c==='centers'||c==='research')return 'المراكز';
  if(QALL||QGLOBAL.includes(c)||c==='all')return '';return EXTRA[c]||CAT[c]?.name||''}
@@ -1135,7 +1141,6 @@ function runSearch(v){
  const c=S.cat;S.q=v;
  if(QALL||QGLOBAL.includes(c)){QSETTING=true;setView('all');QSETTING=false;return}
  if(QLOCAL[c]){const el=$(QLOCAL[c]);el.value=v;el.dispatchEvent(new Event('input'));if(c==='writer'&&v)document.querySelector('[data-wtab="log"]')?.click();return}
- if(c==='centers'){if(v){QSETTING=true;setView('research');QSETTING=false}return}
  if(c==='research'&&!v){setView('centers');return}
  if(c==='saved')return renderSaved();
  load(true)}
@@ -1156,7 +1161,6 @@ if('serviceWorker' in navigator&&(location.protocol==='https:'||['localhost','12
  try{await loadCenters()}catch(e){}
  try{await loadCty()}catch(e){}
  try{await loadQStats()}catch(e){}
- try{const nt=await api('/api/net');NETBAD=nt.countries.filter(c=>c.level!=='normal').length}catch(e){}
  try{BOTON=(await api('/api/bot')).cfg.enabled}catch(e){}
  loadAlertCount();
  try{const b=await api('/api/books');BOOKS_N=b.topics.reduce((a,t)=>a+t.count,0)}catch(e){}

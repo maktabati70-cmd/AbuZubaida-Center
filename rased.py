@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from urllib.parse import quote, quote_plus, urlparse
 
-VERSION = "2026.11.25"
+VERSION = "2026.11.26"
 
 # التشغيل بلا نافذة سوداء (pythonw أو exe بلا وحدة تحكم): نوجّه المخرجات إلى «لا شيء» حتى لا تتعطل الطباعة
 if sys.stdout is None or sys.stderr is None:
@@ -519,6 +519,8 @@ def kv_set(k, v):
 def cleanup_removed():
     """يحذف بقايا الميزات الملغاة (GDELT) من قاعدة البيانات."""
     x("DELETE FROM items WHERE cat='gdelt'")
+    x("DELETE FROM alerts WHERE kind='net'")
+    x("DELETE FROM source_status WHERE name LIKE 'رصد انقطاع الإنترنت%'")
     x("DELETE FROM source_status WHERE cat='gdelt' OR name LIKE 'GDELT:%'")
 
 
@@ -1888,6 +1890,9 @@ def api_items():
         where.append("cat=?"); args.append(cat)
     if source:
         where.append("source_ar=?"); args.append(source)
+    srcs = [x_ for x_ in (a.get("sources") or "").split("|") if x_][:300]
+    if srcs:
+        where.append(f"source_ar IN ({','.join('?' * len(srcs))})"); args += srcs
     if tag:
         where.append("tags LIKE ?"); args.append(f"%|{tag}|%")
     if a.get("qual") == "1":
@@ -3254,106 +3259,6 @@ def locate(r):
     return None
 
 
-# ───────────────────────── رصد انقطاع الإنترنت (IODA - معهد جورجيا للتقنية، مجاني بلا مفتاح) ─────────────────────────
-IODA_API = "https://api.ioda.inetintel.cc.gatech.edu/v2"
-NET_WATCH = ["SY", "IQ", "IR", "LB", "YE", "SD", "LY", "PS", "IL", "EG", "TR", "AF", "PK", "RU", "UA", "SO", "ML", "NE", "BF", "ET"]
-NET_SRC_AR = {"bgp": "التوجيه (BGP)", "ping-slash24": "الاستجابة للفحص", "merit-nt": "حركة الشبكة الخلفية",
-              "gtr": "حركة Google", "ucsd-nt": "حركة الشبكة الخلفية"}
-ISO2AR = {c[1]: c[0] for c in COUNTRIES}
-NET = {"last": 0, "error": ""}
-
-
-def _ent_code(a):
-    ent = a.get("entity") or {}
-    code = (ent.get("code") or a.get("entityCode") or "").upper()
-    if not code and isinstance(a.get("location"), str) and "/" in a["location"]:
-        code = a["location"].split("/")[-1].upper()
-    return code
-
-
-def fetch_ioda():
-    t = now()
-    r = requests.get(f"{IODA_API}/outages/alerts", headers=HEADERS, timeout=45,
-                     params={"from": t - 24 * 3600, "until": t, "entityType": "country", "limit": 3000})
-    if r.status_code != 200:
-        raise ValueError(f"رمز {r.status_code}")
-    data = r.json()
-    data = data.get("data", data) if isinstance(data, dict) else data
-    if isinstance(data, dict):
-        data = data.get("alerts") or []
-    rows = []
-    for a in data or []:
-        if not isinstance(a, dict):
-            continue
-        code = _ent_code(a)
-        if code not in ISO2AR:
-            continue
-        level = (a.get("level") or "").lower()
-        if level not in ("critical", "warning", "normal"):
-            continue
-        ts = int(a.get("time") or a.get("from") or 0)
-        src = a.get("datasource") or ""
-        rows.append((hashlib.sha1(f"{code}|{src}|{ts}|{level}".encode()).hexdigest()[:16], code, ISO2AR[code], src, level, ts,
-                     a.get("value"), a.get("historyValue")))
-    if rows:
-        x("INSERT OR IGNORE INTO net_alerts(id, iso, name, source, level, ts, value, hist) VALUES(?,?,?,?,?,?,?,?)", rows, many=True)
-    x("DELETE FROM net_alerts WHERE ts < ?", (t - 14 * 86400,))
-    # إنذار مبكر عند انقطاع حرج حديث
-    for r_ in q("SELECT iso, name, source, value, hist, ts FROM net_alerts WHERE level='critical' AND ts >= ? ORDER BY ts DESC",
-                (t - 2 * 3600,)):
-        last = q("SELECT created FROM alerts WHERE kind='net' AND key=? ORDER BY created DESC LIMIT 1", (r_["name"],), one=True)
-        if last and t - last["created"] < 6 * 3600:
-            continue
-        drop = ""
-        if r_["value"] is not None and r_["hist"]:
-            try:
-                drop = f"، انخفاض نحو {max(0, round((1 - float(r_['value']) / float(r_['hist'])) * 100))}%"
-            except Exception:
-                drop = ""
-        msg = f"انقطاع إنترنت حرج في {r_['name']}: هبوط في {NET_SRC_AR.get(r_['source'], r_['source'])}{drop}"
-        x("INSERT OR IGNORE INTO alerts(id, kind, key, level, cnt, base, created, msg, detail) VALUES(?,?,?,?,?,?,?,?,?)",
-          (hashlib.sha1(f"net|{r_['name']}|{t}".encode()).hexdigest()[:16], "net", r_["name"], 3, 1, 0, t, msg, r_["iso"]))
-    NET.update(last=t, error="")
-    set_status("رصد انقطاع الإنترنت (IODA)", "official", True, len(rows), "IODA", "")
-    return len(rows)
-
-
-def net_loop():
-    time.sleep(30)
-    while True:
-        try:
-            fetch_ioda()
-        except Exception as e:
-            NET["error"] = str(e)[:150]
-            set_status("رصد انقطاع الإنترنت (IODA)", "official", False, 0, "IODA", NET["error"])
-        time.sleep(600)
-
-
-@app.get("/api/net")
-def api_net():
-    t = now()
-    rows = q("SELECT * FROM net_alerts WHERE ts >= ? ORDER BY ts DESC", (t - 48 * 3600,))
-    status = {}
-    for r in rows:
-        st = status.setdefault(r["iso"], {"iso": r["iso"], "name": r["name"], "level": "normal", "last": 0, "n": 0, "sources": set()})
-        st["n"] += 1
-        if t - r["ts"] <= 3 * 3600 and r["level"] in ("critical", "warning"):
-            if r["level"] == "critical" or st["level"] == "normal":
-                st["level"] = r["level"]
-            st["sources"].add(NET_SRC_AR.get(r["source"], r["source"]))
-        st["last"] = max(st["last"], r["ts"])
-    for iso in NET_WATCH:
-        status.setdefault(iso, {"iso": iso, "name": ISO2AR.get(iso, iso), "level": "normal", "last": 0, "n": 0, "sources": set()})
-    order = {"critical": 0, "warning": 1, "normal": 2}
-    out = sorted(status.values(), key=lambda s_: (order[s_["level"]], -s_["n"]))
-    for s_ in out:
-        s_["sources"] = sorted(s_["sources"])
-        lat, lon = CENTROIDS.get(s_["name"], (None, None))
-        s_.update(lat=lat, lon=lon, link=f"https://ioda.inetintel.cc.gatech.edu/country/{s_['iso']}")
-    recent = [dict(r, source_ar=NET_SRC_AR.get(r["source"], r["source"])) for r in rows if r["level"] != "normal"][:150]
-    return jsonify(countries=out, recent=recent, last=NET["last"], error=NET["error"])
-
-
 # ───────────────────────── شعارات المراكز والمصادر ─────────────────────────
 _ICON_LOCK = threading.Lock()
 
@@ -3566,13 +3471,7 @@ def api_map():
     dens = Counter()
     for r in q("SELECT countries FROM items WHERE published >= ? AND countries != ''", (t0,)):
         dens.update(c for c in r["countries"].strip("|").split("|") if c in CENTROIDS)
-    net = []
-    for r in q("SELECT iso, name, MAX(CASE level WHEN 'critical' THEN 2 WHEN 'warning' THEN 1 ELSE 0 END) lv, MAX(ts) ts "
-               "FROM net_alerts WHERE ts >= ? AND level != 'normal' GROUP BY iso", (now() - 3 * 3600,)):
-        if r["name"] in CENTROIDS:
-            net.append({"name": r["name"], "lat": CENTROIDS[r["name"]][0], "lon": CENTROIDS[r["name"]][1],
-                        "level": "critical" if r["lv"] == 2 else "warning", "ts": r["ts"]})
-    return jsonify(net=net, points=pts, density=[{"name": c, "lat": CENTROIDS[c][0], "lon": CENTROIDS[c][1], "count": n}
+    return jsonify(points=pts, density=[{"name": c, "lat": CENTROIDS[c][0], "lon": CENTROIDS[c][1], "count": n}
                                         for c, n in dens.most_common(60)])
 
 
@@ -4765,7 +4664,6 @@ if __name__ == "__main__":
     threading.Thread(target=analysis_loop, daemon=True).start()
     threading.Thread(target=sanctions_loop, daemon=True).start()
     threading.Thread(target=archiver_loop, daemon=True).start()
-    threading.Thread(target=net_loop, daemon=True).start()
     threading.Thread(target=update_loop, daemon=True).start()
     RUN_HOST = "0.0.0.0" if kv_get("lan") == "1" else "127.0.0.1"
     if RUN_HOST == "0.0.0.0":

@@ -137,12 +137,6 @@
     <div id="ctygrid"></div>
   </section>
 
-  <!-- انقطاع الإنترنت -->
-  <section id="netview" hidden>
-    <div class="netgrid" id="netgrid"></div>
-    <div class="box" style="margin-top:16px"><div class="boxh">آخر تنبيهات الانقطاع (48 ساعة)<span class="sp"></span><span class="wstat" id="netlast"></span></div><div class="tablewrap" id="netrecent"></div></div>
-  </section>
-
   <!-- الإعدادات -->
   <section id="setview" hidden>
     <div class="box lanbox" id="updbox"></div>
@@ -280,10 +274,16 @@
 
   <section id="centersdir" hidden>
     <div class="box cfilters">
-      <div class="cfrow"><input id="cq" type="search" placeholder="ابحث باسم المركز أو موقعه…" aria-label="بحث في المراكز"><span class="count" id="ccount"></span></div>
+      <div class="cfrow"><input id="cq" type="search" placeholder="ابحث عن مركز، أو عن عنوان أو موضوع في مواد المراكز…" aria-label="بحث في المراكز وموادها"><span class="count" id="ccount"></span></div>
       <div class="cfrow"><div class="seg" id="cregion"></div></div>
       <div class="cfrow"><div class="seg" id="ccat"></div></div>
     </div>
+    <div class="box cmatch" id="cmatch" hidden>
+      <div class="boxh"><span id="cmatchttl">المواد المطابقة</span><span class="sp"></span><span class="wstat" id="cmatchn"></span></div>
+      <div class="feed list" id="cmatchlist"></div>
+      <div class="more"><button class="ibtn" id="cmatchmore" hidden>عرض المزيد</button></div>
+    </div>
+    <div class="clbl2" id="cgridttl" hidden>المراكز المطابقة</div>
     <div class="cgrid" id="cgrid"></div>
   </section>
 
