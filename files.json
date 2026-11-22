@@ -1,0 +1,15 @@
+{
+  "files": [
+    "rased.py",
+    "sources_default.py",
+    "ui/index.html",
+    "ui/style.css",
+    "ui/app.js",
+    "ui/icon-192.png",
+    "ui/icon-512.png",
+    "start.py",
+    "build_exe.py",
+    "START.bat",
+    "BUILD_EXE.bat"
+  ]
+}

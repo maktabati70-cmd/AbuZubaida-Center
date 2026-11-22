@@ -53,7 +53,7 @@ def main():
             say(f"  ← {pkg} (اختيارية)")
             pip(pkg)
     say("\n  2) بناء الملف التنفيذي…")
-    args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--console",
+    args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--noconsole",
             "--name", NAME, "--icon", os.path.join(HERE, "icon.ico"),
             "--distpath", os.path.join(HERE, "dist"), "--workpath", os.path.join(HERE, "build"),
             "--specpath", os.path.join(HERE, "build")]
@@ -61,6 +61,8 @@ def main():
                 "webview", "clr_loader", "pythonnet"):
         if has(mod):
             args += ["--collect-all", mod]
+    args += ["--add-data", os.path.join(HERE, "ui") + os.pathsep + "ui", "--paths", HERE,
+             "--hidden-import", "sources_default"]
     args.append(os.path.join(HERE, "rased.py"))
     if subprocess.call(args) != 0:
         say("  ✘ فشل البناء. أرسل آخر الأسطر الظاهرة أعلاه لمعرفة السبب.")

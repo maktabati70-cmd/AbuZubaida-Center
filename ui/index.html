@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="ar" dir="rtl" data-theme="neon">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>مركز أبو زبيدة للتتبع والرصد</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#060B13">
+<link rel="icon" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=Noto+Kufi+Arabic:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/ui/style.css?v={{V}}">
+</head>
+<body>
+<div class="chrome">
+  <div class="statusbar">
+    <span><span class="dot"></span><b>ONLINE</b></span>
+    <span id="utcnow" class="mt"></span>
+    <span class="hide-sm">OSINT MONITORING PLATFORM</span>
+    <span class="sp"></span>
+    <span class="hide-sm" id="sbSources"></span>
+    <span class="hide-sm" id="sbTr"></span>
+  </div>
+  <header class="top">
+    <a class="brand" href="#" data-cat="dash">
+      <span class="mark" aria-hidden="true"><svg viewBox="0 0 28 28" fill="none" stroke="currentColor" style="color:var(--acc)">
+        <circle cx="14" cy="14" r="11" stroke-width="1.2" opacity=".6"/><circle cx="14" cy="14" r="6.5" stroke-width="1" opacity=".45"/>
+        <path d="M14 3v22M3 14h22" stroke-width=".8" opacity=".3"/>
+        <g class="rot"><path d="M14 14L14 3A11 11 0 0 1 23.5 8.5Z" fill="currentColor" stroke="none" opacity=".35"/></g>
+        <circle cx="19" cy="9" r="1.4" fill="var(--red)" stroke="none"/></svg></span>
+      <span><b>مركز أبو زبيدة للتتبع والرصد</b><small>ABU ZUBAIDA · OSINT CENTER</small></span>
+    </a>
+    <label class="search"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+      <input id="q" type="search" placeholder="ابحث في الأخبار والدراسات والمصادر…" autocomplete="off" aria-label="بحث"><button type="button" class="qscope" id="qscope" hidden title="اضغط للبحث في كل البرنامج"></button><kbd>/</kbd></label>
+    <span class="sp"></span>
+    <div class="clocks" id="clocks" aria-label="التوقيت في عواصم العالم"></div>
+    <button class="ibtn primary" id="refresh"><svg class="i" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7L20 8M20 3v5h-5"/></svg><span class="lbltxt">تحديث</span></button>
+    <button class="ibtn" id="cmdbtn" title="لوحة الأوامر (Ctrl+K)" aria-label="لوحة الأوامر"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg><span class="mt lbltxt" style="font-size:11px">Ctrl K</span></button>
+    <button class="ibtn" id="wallbtn" title="وضع الشاشة الكبيرة" aria-label="وضع الشاشة الكبيرة"><svg class="i" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></button>
+    <button class="ibtn bell" id="bell" data-cat="alerts" title="الإنذار المبكر" aria-label="الإنذارات"><svg class="i" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 8 3 8H3s3-1 3-8M10 20a2 2 0 0 0 4 0"/></svg><span class="n" id="belln" hidden></span></button>
+    <button class="ibtn" id="tkToggle" aria-pressed="true" title="إظهار أو إخفاء الأشرطة"><svg class="i" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></svg><span class="lbltxt" id="tkTxt">الأشرطة</span></button>
+    <div class="skins" role="group" aria-label="نمط التصميم">
+      <button data-skin="neon" title="نيون أزرق"><i style="background:#1EA7FF;box-shadow:0 0 8px #1EA7FF"></i></button>
+      <button data-skin="ops" title="غرفة العمليات"><i style="background:#2DD4BF"></i></button>
+      <button data-skin="gold" title="ذهبي"><i style="background:#C9A45C"></i></button>
+      <button data-skin="light" title="نهاري"><i style="background:#EEF1F5"></i></button>
+    </div>
+  </header>
+</div>
+
+<div class="tickers" id="tickers">
+  <div class="ticker" style="--tc:#E11D48" aria-label="العناوين العاجلة"><span class="lbl">عاجل<em>01</em></span><div class="track"><div class="run" id="tk-breaking"></div></div></div>
+  <div class="ticker" style="--tc:#C2410C" aria-label="أخبار الحروب"><span class="lbl">الحروب<em>02</em></span><div class="track"><div class="run" id="tk-war"></div></div></div>
+  <div class="ticker" style="--tc:#6D28D9" aria-label="آخر المقالات"><span class="lbl">آخر المقالات<em>03</em></span><div class="track"><div class="run" id="tk-articles"></div></div></div>
+  <div class="ticker" style="--tc:#047857" aria-label="الأخبار الاقتصادية"><span class="lbl">اقتصاد<em>04</em></span><div class="track"><div class="run" id="tk-economy"></div></div></div>
+</div>
+
+<div class="updbar" id="updbar" hidden><span id="updtxt"></span><button class="ibtn primary" id="updgo">إعادة التشغيل الآن</button><button class="ibtn" id="updlater">لاحقاً</button></div>
+<div class="layout">
+<aside class="sidenav" aria-label="الأقسام">
+  <nav id="nav"></nav>
+  <div class="sidefoot" id="sidefoot"></div>
+</aside>
+<div class="wrap">
+  <div id="pagehead" class="pagehead">
+    <div><span class="code" id="pcode"></span><h1 id="title"></h1><p id="desc"></p></div>
+    <span class="live" id="live"><i></i>مباشر</span>
+  </div>
+  <div id="centerhead" hidden></div>
+  <div id="countryhead" hidden></div>
+
+  <!-- لوحة القيادة -->
+  <section id="dash" hidden>
+    <div class="alertbar" id="dashAlerts"></div>
+    <section class="box qualbox" id="qualbox">
+      <div class="boxh"><span class="pulse" aria-hidden="true"></span>أخبار نوعية<span class="sub">CRITICAL EVENTS / آخر 24 ساعة</span><span class="sp"></span><button class="lnk" data-cat="qual">عرض الكل</button></div>
+      <div class="qtypes" id="qtypes"></div>
+      <div class="qcar" id="qcar" aria-live="polite">
+        <div class="qslide" id="qslide"></div>
+        <div class="qctl">
+          <button class="qnav" id="qprev" aria-label="الخبر السابق">›</button>
+          <div class="qdots" id="qdots"></div>
+          <span class="qpos mt" id="qpos"></span>
+          <button class="qnav" id="qnext" aria-label="الخبر التالي">‹</button>
+        </div>
+        <div class="qprog"><i id="qprog"></i></div>
+      </div>
+    </section>
+    <div class="kpis">
+      <div class="box kpi threat" id="kThreat"></div>
+      <div class="box kpi" id="kHour"></div>
+      <div class="box kpi" id="kSrc"></div>
+      <div class="box kpi" id="kTr"></div>
+    </div>
+    <div class="dashgrid">
+      <div class="boards" id="boards"></div>
+      <div class="rail">
+        <div class="box"><div class="boxh" style="--c:#38BDF8"><svg class="i" viewBox="0 0 24 24"><path d="M21 4L3 11l6 2 2 6 3-4 5 4z"/></svg>آخر منشورات تيليغرام<span class="sp"></span><button class="lnk" data-cat="tweets">كل القنوات</button></div><ul class="twl" id="dashTg"></ul></div>
+        <div class="box"><div class="boxh"><svg class="i" viewBox="0 0 24 24"><path d="M12 3c3 4 5 6 5 10a5 5 0 0 1-10 0c0-2 1-3 2-4 0 2 1 3 2 3 0-3-1-6 1-9z"/></svg>المواضيع الساخنة<span class="sp"></span><span class="sub">48H</span></div><div class="tags" id="dashTags"></div></div>
+        <div class="box"><div class="boxh"><svg class="i" viewBox="0 0 24 24"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>الدول الأكثر حضوراً<span class="sp"></span><button class="lnk" data-cat="countries">كل الدول</button></div><ul class="toplist" id="dashCty"></ul></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="box addpanel" id="kwpanel" hidden>
+    <div class="addrow">
+      <input id="kwinput" placeholder="مثال: هيئة تحرير الشام، الحدود التركية، drone strike" maxlength="60">
+      <button class="ibtn primary" id="kwadd">أضف كلمة</button>
+    </div>
+    <div class="chips" id="kwchips"></div>
+  </section>
+
+  <!-- تيليغرام -->
+  <section id="tgview" hidden>
+    <div class="box addpanel">
+      <div class="addrow">
+        <select id="tgplat" aria-label="المنصة"><option value="telegram">تيليغرام</option><option value="bluesky">Bluesky</option></select>
+        <input id="tgch" placeholder="اسم القناة أو رابطها، مثل: t.me/AJArabic" maxlength="80" dir="auto">
+        <input id="tgname" placeholder="الاسم الظاهر (اختياري)" maxlength="60" style="max-width:230px">
+        <button class="ibtn primary" id="tgadd">أضف</button>
+      </div>
+    </div>
+    <div class="tgtools"><span class="count" id="tgcount"></span><span class="sp" style="flex:1"></span><span class="count" id="tgnext"></span><button class="ibtn" id="tgrefresh"><svg class="i" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7L20 8M20 3v5h-5"/></svg>تحديث القنوات الآن</button></div>
+    <div class="tgboard" id="tgboard"></div>
+  </section>
+
+  <!-- دليل المراكز -->
+  <!-- الدول -->
+  <section id="countriesdir" hidden>
+    <div class="box cfilters">
+      <div class="cfrow"><input id="ctyq" type="search" placeholder="ابحث عن دولة…" aria-label="بحث في الدول"><span class="count" id="ctycount"></span></div>
+      <div class="cfrow"><div class="seg" id="ctyregion"></div></div>
+    </div>
+    <div id="ctygrid"></div>
+  </section>
+
+  <!-- انقطاع الإنترنت -->
+  <section id="netview" hidden>
+    <div class="netgrid" id="netgrid"></div>
+    <div class="box" style="margin-top:16px"><div class="boxh">آخر تنبيهات الانقطاع (48 ساعة)<span class="sp"></span><span class="wstat" id="netlast"></span></div><div class="tablewrap" id="netrecent"></div></div>
+  </section>
+
+  <!-- الإعدادات -->
+  <section id="setview" hidden>
+    <div class="box lanbox" id="updbox"></div>
+    <div id="setlan"></div>
+    <div class="box lanbox"><b style="font:700 14px var(--fd)">وضع الشاشة الكبيرة</b><span class="hint" style="font-size:12.5px;color:var(--muted)">عرض بملء الشاشة لغرفة عمليات أو شاشة على الحائط، يتنقل تلقائياً كل 20 ثانية بين الخريطة والأخبار النوعية والإنذارات وحالة الإنترنت. للخروج اضغط Esc.</span><div class="row"><button class="ibtn primary" id="wallgo">تشغيل وضع الشاشة الكبيرة</button></div></div>
+  </section>
+
+  <!-- اسأل المركز -->
+  <section id="askview" hidden>
+    <div class="box askbox">
+      <input id="askq" placeholder="اسأل عن أي شيء رصده المركز، مثل: ماذا جرى في درعا هذا الأسبوع؟" maxlength="400">
+      <select id="askdays" aria-label="المدة"><option value="1">آخر يوم</option><option value="3">آخر 3 أيام</option><option value="7" selected>آخر أسبوع</option><option value="31">آخر شهر</option></select>
+      <button class="ibtn primary" id="askgo" style="height:46px;padding:0 22px">اسأل</button>
+      <div class="chipsq" id="askex"></div>
+    </div>
+    <div class="askgrid">
+      <div class="box askans"><div class="boxh">الإجابة<span class="sp"></span><span class="wstat" id="askstat"></span><button class="ibtn" id="askcopy" disabled>نسخ</button></div><div class="wdoc" id="askout"><div class="wempty"><b>اكتب سؤالك واضغط «اسأل»</b>يبحث المركز في الأخبار والدراسات المخزنة، ثم يكتب الإجابة مع أرقام مصادرها، بمحرك الكتابة المختار في «كاتب المقالات».</div></div></div>
+      <div class="box"><div class="boxh">المواد التي استُند إليها<span class="sp"></span><span class="wstat" id="askn"></span></div><ul class="askref" id="askrefs"></ul></div>
+    </div>
+  </section>
+
+  <!-- العقوبات والتصنيفات -->
+  <section id="sancview" hidden>
+    <div class="sanclists" id="sanclists"></div>
+    <div class="tabs2" id="sanctabs"><button data-stab="terror" class="on">قوائم الإرهاب</button><button data-stab="new">أحدث الإدراجات</button><button data-stab="all">البحث في القوائم كاملة</button></div>
+    <div class="qtypes box" id="sancgroups" style="margin-bottom:12px"></div>
+    <div class="filters">
+      <input id="sancq" type="search" placeholder="ابحث باسم شخص أو كيان، أو بالجنسية…" style="flex:1;min-width:240px;height:36px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:0 12px">
+      <label class="opt" style="font-size:13px" id="sancterrorlbl" hidden><input type="checkbox" id="sancterror" checked>الإرهاب فقط</label>
+      <span class="count" id="sanccount"></span>
+      <button class="ibtn" id="sancref">تحديث القوائم</button>
+    </div>
+    <div class="box"><div class="tablewrap" id="sanclist"></div><div class="pager" id="sancpager"></div></div>
+  </section>
+
+  <!-- ملفات القضايا -->
+  <section id="casesview" hidden>
+    <div class="casegrid">
+      <div class="box"><div class="boxh">القضايا<span class="sp"></span><button class="ibtn primary" id="casenew" style="height:30px">قضية جديدة</button></div><ul class="caselist" id="caselist"></ul></div>
+      <div class="box" id="casedetail"><div class="wempty"><b>اختر قضية أو أنشئ واحدة</b>أضف إليها الأخبار والدراسات من زر «ملف قضية» في نافذة أي مادة، واكتب ملاحظاتك عليها، ثم صدّرها تقريراً واحداً.</div></div>
+    </div>
+  </section>
+
+  <!-- الأرشيف والعناوين المعدّلة -->
+  <section id="archview" hidden>
+    <div class="tabs2"><button data-atab="arch" class="on">الأرشيف</button><button data-atab="edits">العناوين المعدّلة</button></div>
+    <div class="filters" id="archtools">
+      <div class="seg" id="archhours"><button data-ah="24" class="on">آخر 24 ساعة</button><button data-ah="168">أسبوع</button><button data-ah="720">شهر</button><button data-ah="0">الكل</button></div>
+      <input id="archq" type="search" placeholder="ابحث في الأرشيف كله…" style="flex:1;min-width:220px;height:36px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:0 12px">
+      <span class="count" id="archcount"></span>
+      <button class="ibtn" id="archclear" style="color:var(--red)">حذف الأرشيف</button>
+    </div>
+    <div class="box" id="archbox"><div class="tablewrap" id="archlist"></div><div class="pager" id="archpager"></div></div>
+  </section>
+
+  <!-- الخريطة -->
+  <section id="mapview" hidden>
+    <div class="mapwrap"><div id="map"></div>
+      <div class="mappanel">
+        <span class="t">الأحداث النوعية على الخريطة</span>
+        <div class="seg" id="maphours"><button data-mh="6">6 ساعات</button><button data-mh="24" class="on">يوم</button><button data-mh="72">3 أيام</button><button data-mh="168">أسبوع</button></div>
+        <label class="opt" style="font-size:12.5px"><input type="checkbox" id="mapdens" checked>كثافة الأخبار حسب الدولة</label>
+        <div class="maplegend" id="maplegend"></div>
+        <span class="mapcount" id="mapcount"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- الإنذارات -->
+  <section id="alertsview" hidden>
+    <div class="filters"><div class="seg" id="alhours"><button data-alh="6">6 ساعات</button><button data-alh="24">يوم</button><button data-alh="48" class="on">يومان</button><button data-alh="168">أسبوع</button></div><span class="sp" style="flex:1"></span><span class="count" id="alcount"></span></div>
+    <div class="alertbar" id="allist"></div>
+  </section>
+
+  <!-- بوت تيليغرام -->
+  <section id="botview" hidden>
+    <div class="botgrid">
+      <div class="box bform">
+        <div class="boxh">إعداد البوت</div>
+        <div class="bbody" id="bform"></div>
+      </div>
+      <div>
+        <div class="box"><div class="boxh">حالة النشر<span class="sp"></span><button class="ibtn" id="bsendnow">أرسل مقالة الآن</button></div><div class="bstat" id="bstat"></div></div>
+        <div class="box" style="margin-top:14px"><div class="boxh">آخر ما أُرسل<span class="sp"></span><button class="lnk" id="breset" title="يسمح بإعادة إرسال المقالات السابقة">مسح السجل</button></div><ul class="warts" id="brecent"></ul></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- كاتب المقالات -->
+  <section id="writerview" hidden>
+    <div class="tabs2"><button data-wtab="write" class="on">الكتابة</button><button data-wtab="log">سجل المقالات <span class="mt" id="wlogn"></span></button></div>
+    <div id="wlogview" hidden>
+      <div class="filters"><input id="wlogq" type="search" placeholder="ابحث في المقالات المكتوبة…" style="flex:1;min-width:240px;height:36px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:0 12px"><span class="count" id="wlogcount"></span><button class="ibtn" id="wlogdelall" style="color:var(--red)">حذف الكل</button></div>
+      <div class="box tablewrap" id="wloglist"></div>
+    </div>
+    <div id="wwriteview">
+    <div class="box wkey" id="wkey"></div>
+    <div class="wgrid">
+      <div>
+        <div class="box wform">
+          <label>الموضوع<textarea id="wtopic" placeholder="مثال: مستقبل تنظيم داعش في البادية السورية بعد انسحاب القوات الأمريكية" maxlength="400"></textarea></label>
+          <div class="row2">
+            <label>النوع<select id="wtype"></select></label>
+            <label>الطول<select id="wlen"></select></label>
+          </div>
+          <div class="row2">
+            <label>النبرة<select id="wtone"></select></label>
+            <label>اللغة<select id="wlang"><option value="ar">العربية</option><option value="en">English</option></select></label>
+          </div>
+          <label>زاوية أو ملاحظات (اختياري)<input id="wangle" placeholder="مثال: ركّز على دور العشائر، وقارن بعام 2019" maxlength="300"></label>
+          <label class="chk"><input type="checkbox" id="wsrcuse" checked>استند إلى ما رصده المركز عن الموضوع</label>
+          <div class="wsrc" id="wsrc" hidden></div>
+          <button class="ibtn primary go" id="wgo">اكتب الآن</button>
+          <span class="hint">يُكتب النص كاملاً تلقائياً بالمحرك المختار في الأعلى. يستغرق النص المتوسط دقيقة إلى دقيقتين (وأكثر مع Ollama على الأجهزة العادية).</span>
+        </div>
+        <div class="box" style="margin-top:14px"><div class="boxh">مقالاتي المحفوظة<span class="sp"></span></div><ul class="warts" id="warts"></ul></div>
+      </div>
+      <div class="box wout">
+        <div class="boxh"><span id="wtitle">النص</span><span class="sp"></span><span class="wstat" id="wstat"></span>
+          <button class="ibtn" id="wcopy" disabled>نسخ</button><button class="ibtn" id="wsave" disabled>حفظ</button><button class="ibtn" id="wpdf" disabled>حفظ PDF</button><button class="ibtn" id="wstop" hidden>إيقاف</button></div>
+        <div id="wdoc" class="wdoc"><div class="wempty"><b>اكتب موضوعاً واضغط «اكتب الآن»</b>سيظهر النص هنا أثناء كتابته.</div></div>
+      </div>
+    </div>
+    </div>
+  </section>
+
+  <!-- مكتبة الكتب -->
+  <section id="booksview" hidden>
+    <div class="box cfilters">
+      <div class="cfrow"><input id="bq" type="search" placeholder="ابحث بعنوان الكتاب أو المؤلف…" aria-label="بحث في الكتب"><span class="count" id="bcount"></span><button class="ibtn" id="brefresh"><svg class="i" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7L20 8M20 3v5h-5"/></svg>تحديث المكتبة</button></div>
+      <div class="cfrow"><div class="seg" id="btopic"></div><div class="seg" id="blang"><button data-blang="" class="on">كل اللغات</button><button data-blang="ar">عربي</button><button data-blang="foreign">أجنبي</button></div></div>
+    </div>
+    <div class="bookgrid" id="bookgrid"></div>
+  </section>
+
+  <section id="centersdir" hidden>
+    <div class="box cfilters">
+      <div class="cfrow"><input id="cq" type="search" placeholder="ابحث باسم المركز أو موقعه…" aria-label="بحث في المراكز"><span class="count" id="ccount"></span></div>
+      <div class="cfrow"><div class="seg" id="cregion"></div></div>
+      <div class="cfrow"><div class="seg" id="ccat"></div></div>
+    </div>
+    <div class="cgrid" id="cgrid"></div>
+  </section>
+
+  <!-- صفحات الأقسام -->
+  <section id="secview" class="secgrid" hidden>
+    <div>
+      <div class="qtypes box" id="qualfilter" hidden style="margin-bottom:14px"></div>
+    <div class="filters" id="filters">
+        <div class="seg" id="hours">
+          <button class="on" data-hours="0">الكل</button>
+          <button data-hours="1">ساعة</button>
+          <button data-hours="6">6 ساعات</button>
+          <button data-hours="24">يوم</button>
+          <button data-hours="168">أسبوع</button>
+          <button data-hours="744">شهر</button>
+          <button data-hours="2208">3 أشهر</button>
+        </div>
+        <select id="source" aria-label="تصفية حسب المصدر"><option value="">كل المصادر</option></select>
+        <span id="activetag"></span>
+        <span class="sp"></span>
+        <span class="count" id="count"></span>
+        <div class="seg"><button id="dedupe" title="عرض الحدث الذي نقلته عدة مصادر كخبر واحد">دمج المكرر</button><button id="hideseen" title="إخفاء ما فتحته من قبل">غير المقروءة</button><button id="density" title="عرض مضغوط">مضغوط</button></div>
+      </div>
+      <button class="newpill" id="newpill" hidden></button>
+      <div id="feed" class="feed list"></div>
+      <button class="ibtn more" id="more" hidden>تحميل المزيد</button>
+    </div>
+    <aside class="rail" aria-label="معلومات جانبية">
+      <div class="box"><div class="boxh"><svg class="i" viewBox="0 0 24 24"><path d="M12 3c3 4 5 6 5 10a5 5 0 0 1-10 0c0-2 1-3 2-4 0 2 1 3 2 3 0-3-1-6 1-9z"/></svg>المواضيع الساخنة<span class="sp"></span><span class="sub">48H</span></div><div class="tags" id="tags"></div></div>
+      <div class="box"><div class="boxh" style="--c:#38BDF8"><svg class="i" viewBox="0 0 24 24"><path d="M21 4L3 11l6 2 2 6 3-4 5 4z"/></svg>تيليغرام الآن<span class="sp"></span><button class="lnk" data-cat="tweets">كل القنوات</button></div><ul class="twl" id="tweets"></ul></div>
+      <div class="box"><div class="boxh"><svg class="i" viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg>حالة الرصد<span class="sp"></span><span class="sub">SYS</span></div><div class="status" id="status"></div></div>
+    </aside>
+  </section>
+</div>
+
+</div>
+
+<dialog id="dlg" aria-labelledby="dlgTitle">
+  <div class="dlghead"><div class="meta" id="dlgMeta"></div><button class="ibtn" id="dlgClose" aria-label="إغلاق"><svg class="i" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+  <div class="dlgbody" id="dlgBody"></div>
+</dialog>
+<div class="toast" id="toast" role="status"></div>
+<div id="wall" hidden>
+  <div class="wtop"><span class="wbrand">مركز أبو زبيدة للتتبع والرصد</span><span class="wslide" id="wslidename"></span><span class="sp"></span><span class="wclock mt" id="wclock"></span><button class="ibtn" id="wallexit">خروج (Esc)</button></div>
+  <div class="wbody" id="wbody"><div id="wmap"></div><div id="wpanel"></div></div>
+  <div class="wallprog"><i id="wprog"></i></div>
+  <div class="wtick"><span class="lbl">آخر الأخبار</span><div class="track"><div class="run" id="wtick"></div></div></div>
+</div>
+<div id="cmdk" hidden><div class="cmdbox" role="dialog" aria-label="لوحة الأوامر"><input id="cmdin" placeholder="اكتب: قسماً، دولة، مركزاً، أو كلمة للبحث…" autocomplete="off"><ul id="cmdlist"></ul><div class="cmdhint mt">↑↓ للتنقل · Enter للفتح · Esc للإغلاق</div></div></div>
+
+<script src="/ui/app.js?v={{V}}"></script>
+</body>
+</html>
